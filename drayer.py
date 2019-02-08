@@ -1,5 +1,5 @@
 
-import libnacl,os,sqlite3,struct,time,weakref,msgpack,requests, socket,threading,select
+import libnacl,os,sqlite3,struct,time,weakref,msgpack,requests, socket,threading,select,urllib
 
 from base64 import b64decode, b64encode
 
@@ -7,8 +7,10 @@ import cherrypy
 
 http_port = 33125
 
-MCAST_GRP = '224.1.1.1'
-MCAST_PORT = 5007
+MCAST_GRP = '224.7.130.8'
+MCAST_PORT = 15723
+
+
 listensock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 listensock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 listensock.bind(("", MCAST_PORT))
@@ -157,7 +159,12 @@ class DrayerStream():
 			url+="/"
 			
 		#newRecords/PUBKEY/sinceTime
-		r = requests.get(url+"newRecords/"+b64encode(self.pubkey).decode("utf8")+"/"+str(self.getModifiedTip()),stream=True)
+		r = requests.get(
+				url+
+				"newRecords/"+
+				urllib.parse.quote_plus(b64encode(self.pubkey).decode("utf8"))+
+				"/"+str(self.getModifiedTip()
+			),stream=True)
 		r.raise_for_status()
 		r=r.raw.read(100*1000*1000)
 		
@@ -364,6 +371,7 @@ def drayerUDPListener():
 		rd,w,x= select.select([sendsock,listensock],[],[])
 		for i in rd:
 			b, addr = i.recvfrom(64000)
+			print(b)
 			
 			d = b.decode("utf8").split("\n")
 			
@@ -409,16 +417,15 @@ networkThread = threading.Thread(target=drayerUDPListener, daemon=True)
 networkThread.start()
 
 def startServer():
+	global http_port
+	
 	cherrypy.tree.mount(DrayerWebServer(), '/',{})
-	cherrypy.engine.start()
-
-
-if __name__ == '__main__':
-	startServer()
-	d = DrayerStream("fooo.stream")
-	print(d.getAttr("PublicKey"))
-	d["foo3"] = b"testing"
-	d["foo"] = b"testing3"
-	print(d["foo"])
 	
-	
+	for i in range(0,40):
+		try:
+			cherrypy.engine.start()
+		except:
+			if i==39:
+				raise
+			#Trying random ports till we find a good one
+			http_port = random(8000, 48000)
