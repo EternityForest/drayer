@@ -1,9 +1,29 @@
 
-import libnacl,os,sqlite3,struct,time,weakref,msgpack,requests
+import libnacl,os,sqlite3,struct,time,weakref,msgpack,requests, socket,threading,select
 
 from base64 import b64decode, b64encode
 
 import cherrypy
+
+http_port = 33125
+
+MCAST_GRP = '224.1.1.1'
+MCAST_PORT = 5007
+listensock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+listensock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listensock.bind(("", MCAST_PORT))
+mreq = struct.pack("4sl", socket.inet_aton(MCAST_GRP), socket.INADDR_ANY)
+
+listensock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+listensock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  
+
+MULTICAST_TTL = 2
+sendsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+sendsock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, MULTICAST_TTL)
+
+sendsock.bind(("",0))
+
+
 
 class DrayerWebServer(object):
 	@cherrypy.expose
@@ -38,7 +58,8 @@ class DrayerWebServer(object):
 		
 		
 		
-cherrypy.config.update({'server.socket_port': 9698})
+cherrypy.config.update({'server.socket_port': http_port,'server.socket_host' : '0.0.0.0',
+})
 
 _allStreams = weakref.WeakValueDictionary()
 
@@ -122,9 +143,12 @@ class DrayerStream():
 	
 	def sync(self,url=None):
 		"""Syncs with a remote server"""
-		if url.startswith("http"):
-			self.httpSync(url)
-	
+		if url:
+			if url.startswith("http"):
+				self.httpSync(url)
+			
+		sendsock.sendto(("getRecordsSince\n"+b64encode(self.pubkey).decode("utf8")+"\n"+str(self.getModifiedTip())).encode("utf8"), (MCAST_GRP, MCAST_PORT))
+		
 	def httpSync(self,url):
 		"""Gets any updates that an HTTP server might have"""
 		if url.endswith("/"):
@@ -202,6 +226,7 @@ class DrayerStream():
 		h = libnacl.crypto_generichash(v)
 		sig = self.makeSignature(id,k,h,mtime,prev,prevMtime)
 		self.insertRecord(id,k,v,mtime,prev,prevMtime,sig)
+		self.broadcastUpdate()
 		
 	def __getitem__(self,k):
 		id = self.getIdForKey(k)
@@ -231,7 +256,13 @@ class DrayerStream():
 		x = c.fetchone()
 		if x:
 			return x[0]
-		
+			
+	def broadcastUpdate(self, addr= (MCAST_GRP,MCAST_PORT)):
+		"Anounce what the tip of the modified chain is, to everyone"
+		d = self.getModifiedTip()
+		sendsock.sendto(("record\n"+b64encode(self.pubkey).decode("utf8")+"\n"+str(d)+"\n"+str(http_port)).encode("utf8"), addr)
+	
+	
 	def hasRecordBeenDeleted(self,id):
 		"Returns True, and also deletes the record for real, if it should be garbage collected because its unreachable"
 		#The chain tip is obviously still good
@@ -327,16 +358,67 @@ class DrayerStream():
 
 
 
-if __name__ == '__main__':
-	d = DrayerStream("fooo.stream")
-	d["foo2.0"] = b"testing"
-	d["foo"] = b"testing"
-	print(d["foo"])
-	
+
+def drayerUDPListener():
+	while 1:
+		rd,w,x= select.select([sendsock,listensock],[],[])
+		for i in rd:
+			b, addr = i.recvfrom(64000)
+			
+			d = b.decode("utf8").split("\n")
+			
+			"""
+			getRecordsSince
+			PUBKEY
+			time
+			"""
+			#response
+			"""
+			record
+			PUBKEY
+			timestamp
+			HTTP PORT
+			"""
+			
+			if d[0] == "getRecordsSince":
+				if b64decode(d[1]) in _allStreams:
+					try:
+						
+						x= _allStreams[b64decode(d[1])].getThreadCopy()			
+						h = x.getRecordsSince(int(d[2])).fetchone()
+						if not h:
+							continue
+						h = h["modified"]
+						
+						x.broadcastUpdate(addr)
+					finally:
+						del x
+						
+			if d[0] == "record":
+				print(d)
+				if b64decode(d[1]) in _allStreams:
+					try:
+						x= _allStreams[b64decode(d[1])].getThreadCopy()
+						if int(d[2])> x.getModifiedTip():
+							x.sync("http://"+addr[0]+":"+d[3])
+					finally:
+						del x
+					
+						
+networkThread = threading.Thread(target=drayerUDPListener, daemon=True)
+networkThread.start()
+
+def startServer():
 	cherrypy.tree.mount(DrayerWebServer(), '/',{})
 	cherrypy.engine.start()
-	time.sleep(3)
-	#Can only serve one per pubkey in a process
-	d2 = DrayerStream("foooClone.stream", d.pubkey, noServe=True)
-	d2.sync("http://localhost:9698/")
-	print(d2["foo"])
+
+
+if __name__ == '__main__':
+	startServer()
+	d = DrayerStream("fooo.stream")
+	print(d.getAttr("PublicKey"))
+	d["foo3"] = b"testing"
+	d["foo"] = b"testing3"
+	print(d["foo"])
+	
+	
