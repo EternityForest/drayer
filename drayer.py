@@ -1,5 +1,5 @@
 
-import libnacl,os,sqlite3,struct,time,weakref
+import libnacl,os,sqlite3,struct,time,weakref,msgpack,requests
 
 from base64 import b64decode, b64encode
 
@@ -11,16 +11,34 @@ class DrayerWebServer(object):
 		return "Hello World!"
         
 	@cherrypy.expose
-	def newRecords(self, streampk, time):
+	def newRecords(self, streampk, t):
 		"Returns a msgpacked list of new records"
+		cherrypy.response.headers['Content-Type']="application/octet-stream"
+		t = int(t)
+		c = _allStreams[b64decode(streampk)].getThreadCopy().getRecordsSince(t)
+		limit = 100
+		l = []
+		for i in c:
+			if limit<1:
+				break
+			l.append({
+				"hash":i["hash"],
+				"key":i["key"],
+				"val":i["value"],
+				"id": i["id"],
+				"sig":i["signature"],
+				"prev":i["prev"],
+				"prevch":i["prevchange"],
+				"mod":i["modified"]
+			})
+	
+		x= msgpack.packb(l)
+		return(x)
+			
+		
 		
 		
 cherrypy.config.update({'server.socket_port': 9698})
-
-
-
-if __name__ == '__main__':
-   pass#cherrypy.quickstart(DrayerWebServer(), '/')
 
 _allStreams = weakref.WeakValueDictionary()
 
@@ -28,10 +46,11 @@ _allStreams = weakref.WeakValueDictionary()
 
 
 class DrayerStream():
-	def __init__(self, fn=None, pubkey=None):
+	def __init__(self, fn=None, pubkey=None,noServe=False):
 		
 		if pubkey:
-			pubkey=b64decode(pubkey)
+			if isinstance(pubkey, str):
+				pubkey=b64decode(pubkey)
 		
 		self.pubkey = None
 		self.fn = fn
@@ -58,22 +77,37 @@ class DrayerStream():
 
 			pk = self.getAttr("PublicKey")
 			if pk:
-				self.pubkey = b64decode(pk)
-				if pubkey and not(pk==pubkey):
+				pk = b64decode(pk)
+			if pubkey and pk and not(pk==pubkey):
 					raise ValueError("You specified a pubkey, but the file already contains one that does not match")
+					
+			if pk:
+				self.pubkey = pk
 			else:
-				vk, sk = libnacl.crypto_sign_keypair()
-				self.setAttr("PublicKey", b64encode(vk).decode("utf8"))
-				self.pubkey = vk
-				self.privkey = sk
-				self.savePK()
+				if not pubkey:
+					#No pubkey in the file or in the input, assume they want to make a new
+					vk, sk = libnacl.crypto_sign_keypair()
+					self.setAttr("PublicKey", b64encode(vk).decode("utf8"))
+					self.pubkey = vk
+					self.privkey = sk
+					self.savePK()
+				else:
+					#Get the pubkey from user
+					self.setAttr("PublicKey", b64encode(pubkey).decode("utf8"))
+					self.pubkey = pubkey
+					self.privkey = None
 				
 			if os.path.exists(fn+".privatekey"):
 				with open(fn+".privatekey") as f:
 					self.privkey = b64decode(f.read())
 					
-			_allStreams[self.pubkey] = self
+			if not noServe:
+				_allStreams[self.pubkey] = self
 	
+	
+	def getThreadCopy(self):
+		"Returns another DrayerStream that should be open to the same db"
+		return DrayerStream(self.fn,self.pubkey,True)
 	
 	
 	def getBytesForSignature(self, id,key,h, modified, prev,prevchanged):
@@ -85,7 +119,29 @@ class DrayerStream():
 		return libnacl.crypto_sign_detached(d, self.privkey)
 		
 		
+	
+	def sync(self,url=None):
+		"""Syncs with a remote server"""
+		if url.startswith("http"):
+			self.httpSync(url)
+	
+	def httpSync(self,url):
+		"""Gets any updates that an HTTP server might have"""
+		if url.endswith("/"):
+			pass
+		else:
+			url+="/"
+			
+		#newRecords/PUBKEY/sinceTime
+		r = requests.get(url+"newRecords/"+b64encode(self.pubkey).decode("utf8")+"/"+str(self.getModifiedTip()),stream=True)
+		r.raise_for_status()
+		r=r.raw.read(100*1000*1000)
 		
+		r = msgpack.unpackb(r)
+		for i in r:
+			self.insertRecord(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"])
+			
+			
 	def checkSignature(self, id,key,h, modified, prev,prevchanged, sig):
 		d = self.getBytesForSignature(id,key,h, modified, prev,prevchanged)
 		return libnacl.crypto_sign_verify_detached(sig, d, self.pubkey)
@@ -104,13 +160,22 @@ class DrayerStream():
 		
 		mtip = self.getModifiedTip()
 		if not prevchanged == mtip:
-			raise ValueError("New records must connect to the previous modified value")
+			#Obviously we have to allow anything at all to connect on to the very beginning.
+			if mtip:
+				#And of course we have the exception for linking to the back
+				if self.getChainBackPointer()==id:
+					raise ValueError("New records must connect to the previous modified value")
 		
 		tip = self.getChainTip()
 		
 		if not prev ==tip:
 			if not self.getRecordById(id):
-				raise ValueError("New records must modify an existing entry, or append to the end")
+				#Tip is 0, we can start anywhere
+				if tip:
+					#Also, we can append to the back
+					if self.getChainBackPointer()==id:
+						raise ValueError("New records must modify an existing entry, or append to one of the ends")
+				
 				
 		with self.conn:
 			self.conn.execute("DELETE FROM record WHERE id=?",(id,))
@@ -175,7 +240,7 @@ class DrayerStream():
 			return False
 	
 		#Something still refers to it
-		if hasReferrent(id):
+		if self.hasReferrent(id):
 			return False
 		
 		#Delete the record for real, so it doesn't trouble us anymore
@@ -212,14 +277,20 @@ class DrayerStream():
 			return x[0]
 		return 0
 		
-	def getRecordsSince(self):
-		"Gets the cursor that can iterate over a certain number of records"
+	def getChainBackPointer(self):
+		"Gets whatever the back record is pointing to. If it's not 0, we don't have full history"
 		c=self.conn.cursor()
-		c.execute("SELECT id FROM record ORDER BY id DESC")
-		x=c.fetch()
+		c.execute("SELECT prev FROM record ORDER BY id ASC")
+		x=c.fetchone()
 		if not x==None:
 			return x[0]
 		return 0
+		
+	def getRecordsSince(self,t):
+		"Gets the cursor that can iterate over a certain number of records"
+		c=self.conn.cursor()
+		c.execute("SELECT * FROM record WHERE modified>? ORDER BY id ASC",(t,))
+		return c
 
 
 	def getModifiedTip(self):
@@ -253,6 +324,19 @@ class DrayerStream():
 		 
 
 
-d = DrayerStream("fooo.stream")
-d["foo"] = b"testing"
-print(d["foo"])
+
+
+
+if __name__ == '__main__':
+	d = DrayerStream("fooo.stream")
+	d["foo2.0"] = b"testing"
+	d["foo"] = b"testing"
+	print(d["foo"])
+	
+	cherrypy.tree.mount(DrayerWebServer(), '/',{})
+	cherrypy.engine.start()
+	time.sleep(3)
+	#Can only serve one per pubkey in a process
+	d2 = DrayerStream("foooClone.stream", d.pubkey, noServe=True)
+	d2.sync("http://localhost:9698/")
+	print(d2["foo"])
