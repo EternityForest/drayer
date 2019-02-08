@@ -1,7 +1,31 @@
 
-import libnacl,os,sqlite3,struct,time
+import libnacl,os,sqlite3,struct,time,weakref
 
 from base64 import b64decode, b64encode
+
+import cherrypy
+
+class DrayerWebServer(object):
+	@cherrypy.expose
+	def index(self):
+		return "Hello World!"
+        
+	@cherrypy.expose
+	def newRecords(self, streampk, time):
+		"Returns a msgpacked list of new records"
+		
+		
+cherrypy.config.update({'server.socket_port': 9698})
+
+
+
+if __name__ == '__main__':
+   pass#cherrypy.quickstart(DrayerWebServer(), '/')
+
+_allStreams = weakref.WeakValueDictionary()
+
+
+
 
 class DrayerStream():
 	def __init__(self, fn=None, pubkey=None):
@@ -14,6 +38,8 @@ class DrayerStream():
 	
 		if fn:
 			self.conn=sqlite3.connect(fn)
+			self.conn.row_factory = sqlite3.Row
+			
 			c=self.conn.cursor()
 			#This is just a basic key value table for really simple basic info about the
 			#Stream
@@ -22,13 +48,15 @@ class DrayerStream():
 			#This is the actual record chain
 			## id: Numeric incrementing ID
 			##key, value: same meaning as any other dict
+			##hash: the hash of the value(blake2b). The signature is overthe hash
+				#	not the real data, so that we can implement partial
+				#   mirrors with all metadata but without large files 
 			#modified: Modification date, microsecods since unix
 			#prev: Pointer to the previous block in the chain. Points to the ID.
 			#prevchanged: At the time this block was last changed, it points to the previous most recent modified date
-			c.execute("CREATE TABLE IF NOT EXISTS record (id integer primary key, key text, value text, modified integer, prev integer, prevchange integer, signature blob);")
+			c.execute("CREATE TABLE IF NOT EXISTS record (id integer primary key, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob);")
 
 			pk = self.getAttr("PublicKey")
-			print("PK found")
 			if pk:
 				self.pubkey = b64decode(pk)
 				if pubkey and not(pk==pubkey):
@@ -44,28 +72,33 @@ class DrayerStream():
 				with open(fn+".privatekey") as f:
 					self.privkey = b64decode(f.read())
 					
+			_allStreams[self.pubkey] = self
 	
 	
 	
-	def getBytesForSignature(self, id,key,value, modified, prev,prevchanged):
+	def getBytesForSignature(self, id,key,h, modified, prev,prevchanged):
 		#This is currently the definition of how to make a signature
-		return struct.pack("<QqqqL", id,modified,prev, prevchanged,len(key))+key.encode("utf8")+value
+		return struct.pack("<QqqqL", id,modified,prev, prevchanged,len(key))+key.encode("utf8")+h
 	
-	def makeSignature(self, id,key,value, modified, prev,prevchanged):
-		d = self.getBytesForSignature(id,key,value, modified, prev,prevchanged)
+	def makeSignature(self, id,key, h, modified, prev,prevchanged):
+		d = self.getBytesForSignature(id,key,h, modified, prev,prevchanged)
 		return libnacl.crypto_sign_detached(d, self.privkey)
 		
 		
 		
-	def checkSignature(self, id,key,value, modified, prev,prevchanged, sig):
-		d = self.getBytesForSignature(id,key,value, modified, prev,prevchanged)
+	def checkSignature(self, id,key,h, modified, prev,prevchanged, sig):
+		d = self.getBytesForSignature(id,key,h, modified, prev,prevchanged)
 		return libnacl.crypto_sign_verify_detached(sig, d, self.pubkey)
 		
 		
 	def insertRecord(self, id,key,value, modified, prev,prevchanged, signature):
 		#Most basic test, make sure it's signed correctly
-		self.checkSignature(id,key,value, modified, prev,prevchanged, signature)
 		
+		#We don't supply a hash because we check it here anyway
+		h= libnacl.crypto_generichash(value)
+
+		self.checkSignature(id,key, h,modified, prev,prevchanged, signature)
+	
 		#The thing that the old block that we might be replacing used to point at
 		oldPrev = self.getPrev(id)
 		
@@ -81,7 +114,7 @@ class DrayerStream():
 				
 		with self.conn:
 			self.conn.execute("DELETE FROM record WHERE id=?",(id,))
-			self.conn.execute("INSERT INTO record VALUES(?,?,?,?,?,?,?)",(id,key,value,modified,prev,prevchanged, signature))
+			self.conn.execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?)",(id,key,value,h,modified,prev,prevchanged, signature))
 			#Check if this comm
 			if oldPrev:
 				if not oldPrev==prev:
@@ -101,8 +134,8 @@ class DrayerStream():
 			
 		mtime = int(time.time()*1000*1000)
 		prevMtime = self.getModifiedTip()
-		print(id,k,v,mtime,prev,prevMtime)
-		sig = self.makeSignature(id,k,v,mtime,prev,prevMtime)
+		h = libnacl.crypto_generichash(v)
+		sig = self.makeSignature(id,k,h,mtime,prev,prevMtime)
 		self.insertRecord(id,k,v,mtime,prev,prevMtime,sig)
 		
 	def __getitem__(self,k):
@@ -110,8 +143,10 @@ class DrayerStream():
 		if id==None:
 			raise KeyError(k)
 		
-		id,key,value,mtime,prev,prevmtime,sig= self.getRecordById(id)
-		self.checkSignature(id, key,value, mtime,prev,prevmtime,sig)
+		id,key,value,h,mtime,prev,prevmtime,sig= self.getRecordById(id)
+		self.checkSignature(id, key,h, mtime,prev,prevmtime,sig)
+		if not libnacl.crypto_generichash(value)==h:
+			raise RuntimeError("Bad hash in database")
 		if not self.hasRecordBeenDeleted(id):
 			return self.filterGet(value)
 		
@@ -123,6 +158,7 @@ class DrayerStream():
 	
 	def filterGet(self,v):
 		return v
+		
 	def getIdForKey(self, key):
 		"Returns the ID of the most recent record with a given key"
 		c=self.conn.cursor()
@@ -175,6 +211,15 @@ class DrayerStream():
 		if not x==None:
 			return x[0]
 		return 0
+		
+	def getRecordsSince(self):
+		"Gets the cursor that can iterate over a certain number of records"
+		c=self.conn.cursor()
+		c.execute("SELECT id FROM record ORDER BY id DESC")
+		x=c.fetch()
+		if not x==None:
+			return x[0]
+		return 0
 
 
 	def getModifiedTip(self):
@@ -207,7 +252,7 @@ class DrayerStream():
 			self.conn.execute("INSERT INTO attr VALUES (?,?)",(k,v))
 		 
 
+
 d = DrayerStream("fooo.stream")
-print (d.getAttr("PublicKey"))
 d["foo"] = b"testing"
 print(d["foo"])
