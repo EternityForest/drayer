@@ -1,5 +1,5 @@
 
-import libnacl,os,sqlite3,struct,time,weakref,msgpack,requests, socket,threading,select,urllib
+import libnacl,os,sqlite3,struct,time,weakref,msgpack,requests, socket,threading,select,urllib,random
 
 from base64 import b64decode, b64encode
 
@@ -78,6 +78,8 @@ class DrayerStream():
 		
 		self.pubkey = None
 		self.fn = fn
+		
+		self.noServe = noServe
 	
 		if fn:
 			self.conn=sqlite3.connect(fn)
@@ -128,13 +130,13 @@ class DrayerStream():
 				with open(fn+".privatekey") as f:
 					self.privkey = b64decode(f.read())
 					
-			if not noServe:
+			if noServe==False:
 				_allStreams[self.pubkey] = self
 	
 	
 	def getThreadCopy(self):
 		"Returns another DrayerStream that should be open to the same db"
-		return DrayerStream(self.fn,self.pubkey,True)
+		return DrayerStream(self.fn,self.pubkey,True if self.noServe else "copy")
 	
 	
 	def getBytesForSignature(self, id,key,h, modified, prev,prevchanged):
@@ -152,9 +154,34 @@ class DrayerStream():
 		if url:
 			if url.startswith("http"):
 				self.httpSync(url)
-			
-		sendsock.sendto(("getRecordsSince\n"+b64encode(self.pubkey).decode("utf8")+"\n"+str(self.getModifiedTip())).encode("utf8"), (MCAST_GRP, MCAST_PORT))
 		
+		
+		if torrentServer:
+			bthash=libnacl.crypto_generichash(self.pubkey)
+			bthash=libnacl.crypto_generichash(bthash)[:20]			
+			#Sync with 5 random DHT nodes. We just hope that eventually we will
+			#get good data.
+			print("searching",bthash)
+			x = torrentServer.get_peers(bthash)
+			print(x)
+			if x:
+				for i in random.shuffle()[:5]:
+					print("Found BitTorrent node!",i)
+					try:
+						self.directHttpSync(ip,port)
+					except:
+						print(traceback.format_exc())
+					
+				
+			
+		if localDiscovery:
+			print("doing local discovery")
+			sendsock.sendto(("getRecordsSince\n"+b64encode(self.pubkey).decode("utf8")+"\n"+str(self.getModifiedTip())).encode("utf8"), (MCAST_GRP, MCAST_PORT))
+	
+	def directHttpSync(self,ip,port):
+		"Use an ip port pair to sync"
+		self.httpSync("http://"+ip+":"+str(port))
+
 	def httpSync(self,url):
 		"""Gets any updates that an HTTP server might have"""
 		if url.endswith("/"):
@@ -335,6 +362,18 @@ class DrayerStream():
 	def filterGet(self,v):
 		return v
 		
+	def advertiseOnBittorent(self):
+		if self.noServe:
+			raise RuntimeError("noServe is enabled for this object. Perhaps you meant to advertise from the main thread?")
+			
+		bthash=libnacl.crypto_generichash(self.pubkey)
+		bthash=libnacl.crypto_generichash(bthash)[:20]
+		
+		if torrentServer:
+			print("advertizing", bthash)
+			torrentServer.announce_peer(bthash, http_port,0,False)
+			
+		
 	def getIdForKey(self, key):
 		"Returns the ID of the most recent record with a given key"
 		c=self.conn.cursor()
@@ -345,7 +384,17 @@ class DrayerStream():
 			
 	def broadcastUpdate(self, addr= (MCAST_GRP,MCAST_PORT)):
 		"Anounce what the tip of the modified chain is, to everyone"
+		print("bcaststart")
+		if not localDiscovery:
+			return
+			
+		#noServe has one special value Copy that enables this but dis
+		
+		if self.noServe==True:
+			return
+			
 		d = self.getModifiedTip()
+		print("to", addr)
 		sendsock.sendto(("record\n"+b64encode(self.pubkey).decode("utf8")+"\n"+str(d)+"\n"+str(http_port)).encode("utf8"), addr)
 	
 	
@@ -443,11 +492,30 @@ class DrayerStream():
 
 
 
+fullSyncInterval = 7200
+lastDidFullSync= time.time()
 
-
-def drayerUDPListener():
+def drayerServise():
+	global lastDidFullSync
+	
 	while 1:
-		rd,w,x= select.select([sendsock,listensock],[],[])
+		#This failing is just a normal expected thing. We won't always be able to access everything.
+		try:
+			if time.time()-lastDidFullSync>fullSyncInterval:
+				for i in _allStreams:
+					try:
+						i.sync()
+					except:
+						pass
+		except:
+			pass
+		
+		#Past this point is LAN stuff
+		if not localDiscovery:
+			time.sleep(1)
+			continue
+			
+		rd,w,x= select.select([sendsock,listensock],[],[], 30)
 		for i in rd:
 			b, addr = i.recvfrom(64000)
 			print(b)
@@ -491,11 +559,30 @@ def drayerUDPListener():
 					finally:
 						del x
 					
-						
-networkThread = threading.Thread(target=drayerUDPListener, daemon=True)
-networkThread.daemon=True
-networkThread.start()
 
+
+thr = threading.Thread(target=drayerServise, daemon=True)
+thr.daemon=True
+localDiscovery=False
+thr.start()
+
+def startLocalDiscovery():
+	global localDiscovery
+	localDiscovery = True
+
+def openRouterPort():
+	"Open a port on the local router, making cherrypy's HTTP server TOTALLY PUBLIC"
+	from . import handleupnp
+	handleupnp.addMapping(http_port, "TCP", "Drayer HTTP protocol")
+
+torrentServer=None
+
+def startBittorent():
+	import btdht
+	global torrentServer
+	torrentServer = btdht.DHT()
+	torrentServer.start()
+	
 def startServer():
 	global http_port
 	
@@ -504,6 +591,7 @@ def startServer():
 	for i in range(0,40):
 		try:
 			cherrypy.engine.start()
+			break
 		except:
 			if i==39:
 				raise

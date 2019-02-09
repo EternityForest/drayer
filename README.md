@@ -27,7 +27,9 @@ Making a new stream:
 ```python
 	import drayer
 	#Starts an actual CherryPy server process
-	startServer()
+	drayer.startServer()
+	drayer.startLocalDiscovery()
+
 	#If it doesn't exist, it is created, along with a new keypair
 	d = drayer.DrayerStream("fooo.stream")
 	print(d.getAttr("PublicKey"))
@@ -45,6 +47,7 @@ import drayer, time
 #replace the pubkey with the key you got from the original stream
 #Since we are asking for a specific pubkey and we don't have the private key
 #It knows we're trying to clone it.
+drayer.startLocalDiscovery()
 d2 = drayer.DrayerStream("foooClone.stream", "1gqqI9XK7Lnch1F+qnV+1o6oq91KsXN38hKwQ50qdmw=")
 time.sleep(2)
 d2.sync()

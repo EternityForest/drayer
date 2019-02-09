@@ -73,7 +73,6 @@ def addMapping(port,proto, desc="Description here"):
 		del s
 		
 		for j in i.services:
-			print(j.service_type)
 			for k in j.actions:
 				if k.name=="GetExternalIPAddress":
 					if "WAN" in j.service_type:
