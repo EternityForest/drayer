@@ -94,7 +94,10 @@ references, but this doesn't matter in some use cases.
 
 ## SQlite Storage
 The actual records are stored in the following table:
-`CREATE TABLE IF NOT EXISTS record (id integer primary key, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob);`
+`CREATE TABLE IF NOT EXISTS record (id integer primary key, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob,chain blob);`
+
+The chain entry is normally blank, but we have native support for "sibling chains", so we can store OTHER chains in here that are considered "included"
+when we ask for results. These other chains should sync just like the main chain although we can only add to the main chain.
 
 The basic "attributes", misc data we store in the file, is kept in:
 `CREATE TABLE IF NOT EXISTS attr (key text, value text);`
@@ -138,6 +141,10 @@ Clients should repeat the request if many records were sent(>100), to make sure 
 ##### mod
 ##### prev
 ##### sig
+##### chain
+Which chain the record belongs to (Binary pubkey). If this is blank, it is the "primary chain", the actual one being requested.
+However it can also be a "sibling chain", considered "merged" with this chain, to simulate the abilty to have multiple writers for one
+stream.
 
 It is acceptable to omit the val key for large files, to only transfer metadata.
 
