@@ -2,17 +2,19 @@ import upnpclient,atexit,threading,socket
 from urllib.parse import urlparse
 
 
+listlock = threading.Lock()
 
 cleanuplist = []
 renewlist=[]
 
 
 def cleanup():
-	for i in cleanuplist:
-		try:
-			i()
-		except Exception as e:
-			print(e)
+	with listlock:
+		for i in cleanuplist:
+			try:
+				i()
+			except Exception as e:
+				print(e)
 atexit.register(cleanup)
 
 
@@ -30,9 +32,33 @@ def getWANAddresses():
 	return addresses
 						
 
+
+class Mapping():
+	"Represents one port mapping"
+	
+	def __init__(self, clfun, renfun):
+		self.clfun = clfun
+		self.renfun = renfun
+	
+	def __del__(self):
+		self.delete()
+	
+	def delete(self):
+		self.clfun()
+		
+		with listlock:
+			if self.clfun in cleanuplist:
+				cleanuplist.remove(self.clfun)
+			if self.renfun in cleanuplist:
+				renewlist.remove(self.clfun)
+		
+				
 #Asks them to open port from the outside world directly to us.
 def addMapping(port,proto, desc="Description here"):
+	"""Returns a list of Mapping objects"""
 	devices = upnpclient.discover()
+	mappings = []
+
 	for i in devices:
 		l=urlparse(i.location).netloc
 		if ":" in l:
@@ -43,7 +69,6 @@ def addMapping(port,proto, desc="Description here"):
 		
 		#Get the IP that we use to talk to that particular router
 		ownAddr = s.getsockname()[0]
-		print(ownAddr)
 		s.close()
 		del s
 		
@@ -59,8 +84,9 @@ def addMapping(port,proto, desc="Description here"):
 								NewProtocol=proto,
 							)
 							print("del")
-						
-						cleanuplist.append(clean)
+							
+						with listlock:
+							cleanuplist.append(clean)
 							
 						def renew(): 
 							j.AddPortMapping(
@@ -76,14 +102,18 @@ def addMapping(port,proto, desc="Description here"):
 							print("add")
 							
 						renew()
-						renewlist.append(renew)
+						with listlock:
+							renewlist.append(renew)
+						mappings.append(Mapping(clean,renew))
+	return mappings
 						
 def renewer():
 	while 1:
 		time.sleep(3600/2)
 		try:
-			for i in renewlist:
-				i()
+			with listlock:
+				for i in renewlist:
+					i()
 		except Exception as e:
 			print(e)
 

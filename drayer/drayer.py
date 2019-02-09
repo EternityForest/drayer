@@ -51,7 +51,8 @@ class DrayerWebServer(object):
 				"sig":i["signature"],
 				"prev":i["prev"],
 				"prevch":i["prevchange"],
-				"mod":i["modified"]
+				"mod":i["modified"],
+				"chain":i["chain"]
 			})
 	
 		x= msgpack.packb(l)
@@ -95,8 +96,11 @@ class DrayerStream():
 				#   mirrors with all metadata but without large files 
 			#modified: Modification date, microsecods since unix
 			#prev: Pointer to the previous block in the chain. Points to the ID.
-			#prevchanged: At the time this block was last changed, it points to the previous most recent modified date
-			c.execute("CREATE TABLE IF NOT EXISTS record (id integer primary key, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob);")
+			#prevchange: At the time this block was last changed, it points to the previous most recent modified date
+			#chain: If empty, it's the default chain. But we can also store "sibling chains" in here. We
+			#would list them by the public key.
+			 
+			c.execute("CREATE TABLE IF NOT EXISTS record (id integer primary key, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob, chain blob);")
 
 			pk = self.getAttr("PublicKey")
 			if pk:
@@ -137,9 +141,9 @@ class DrayerStream():
 		#This is currently the definition of how to make a signature
 		return struct.pack("<QqqqL", id,modified,prev, prevchanged,len(key))+key.encode("utf8")+h
 	
-	def makeSignature(self, id,key, h, modified, prev,prevchanged):
+	def makeSignature(self, id,key, h, modified, prev,prevchanged,chain=None):
 		d = self.getBytesForSignature(id,key,h, modified, prev,prevchanged)
-		return libnacl.crypto_sign_detached(d, self.privkey)
+		return libnacl.crypto_sign_detached(d, chain or self.privkey)
 		
 		
 	
@@ -169,53 +173,130 @@ class DrayerStream():
 		r=r.raw.read(100*1000*1000)
 		
 		r = msgpack.unpackb(r)
+		
+		#Haven't needed to read siblings yet
+		siblings = None
+		
+		
 		for i in r:
-			self.insertRecord(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"])
+			if i[b'chain']:
+				if not siblings:
+					siblings=self.getSiblingChains()
+					
+			self.insertRecord(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],i[b'chain'])
 			
 			
-	def checkSignature(self, id,key,h, modified, prev,prevchanged, sig):
+	def checkSignature(self, id,key,h, modified, prev,prevchanged, sig,chain=None):
 		d = self.getBytesForSignature(id,key,h, modified, prev,prevchanged)
-		return libnacl.crypto_sign_verify_detached(sig, d, self.pubkey)
+		return libnacl.crypto_sign_verify_detached(sig, d, chain or self.pubkey)
+		
+	def getSiblingChains():
+		"""Return a dict of all sibling chains, including ones referenced BY sibling chains that have not been synced yet.
+			dict entries returned as:
+			
+			pubkey(bin): entrytimestamp, validstart(0 for never), validend(0 for none)
+					
+			Nodes merge in records from other nodes,and later entrytimestamps take priority.
+			We have no way to really delete these records, just to leave an invalid marker.
+			
+			However, we have a special reseved entry. A pubkey value of b"COMPLETE" declares
+			that there are no period entries older than that which are still valid.
+			
+			To make things easier, only one period per key.
+			
+			The actual DrayerSiblings record format is just a list of msgpack dicts.
+		"""	
+		
+		c=self.conn.cursor()
+		
+		#Note that we read from all siblings. The sibling of our sibling is also our sibling.
+		c.execute('SELECT id FROM record WHERE key="__drayer_siblings__"',(key,))
+		periods = {}
+		
+		#This is a really slow process of reading things. We probably need to cache this somehow.
+		for i in c:
+			self.validateRecord(i["id"], i["chain"])
+			#Get all the records
+			value = msgpack.unpackb(i["value"])
+			for j in value:
+				if j["pubkey"] in periods:
+					if j["timestamp"] > periods[j["pubkey"]]["timestamp"]:
+							periods[j["pubkey"]] = j
+				else:
+					periods[i["pubkey"]] = j
+			torm=[]
+		
+		#After we have everything, delete the 
+		#Records that have been deleted by COMPLETEs.
+		for j in periods:
+			if periods[j]["pubkey"]== b'COMPLETE':
+				for k in periods:
+					if periods[k]["timestamp"]< periods["j"]["timestamp"]:
+						torm.append(k)
+		for i in torm:
+			del periods[i]
+			
+		#TODO: Actually delete the unneeded stuff, and merge all the siblings into one
+		#which we then write back to the main chain
 		
 		
-	def insertRecord(self, id,key,value, modified, prev,prevchanged, signature):
+		return {i:(periods[i]["timestamp"], periods[i]["from"],periods[i]["to"]) for i in periods}
+						
+			
+	def validateRecord(self,id, chain=b""):
+		##Make sure a record is actually supposed to be there
+		x = self.getRecordById(id,chain)
+		
+		h= libnacl.crypto_generichash(x["value"])
+		if not h==x["hash"]:
+			raise RuntimeError("Bad Hash")
+		
+
+		self.checkSignature(id,x["key"], h,x["modified"], x["prev"],x["prevchange"], x["signature"],chain)
+		if self.hasRecordBeenDeleted(id,chain):
+			raise RuntimeError("Record appears valid but was deleted by a later change")
+
+		
+		
+		
+	def insertRecord(self, id,key,value, modified, prev,prevchanged, signature, chain=b""):
 		#Most basic test, make sure it's signed correctly
 		
 		#We don't supply a hash because we check it here anyway
 		h= libnacl.crypto_generichash(value)
-
-		self.checkSignature(id,key, h,modified, prev,prevchanged, signature)
+		self.checkSignature(id,key, h,modified, prev,prevchanged, signature,chain)
 	
 		#The thing that the old block that we might be replacing used to point at
-		oldPrev = self.getPrev(id)
+		oldPrev = self.getPrev(id,chain)
 		
-		mtip = self.getModifiedTip()
+
+		mtip = self.getModifiedTip(chain)
 		if not prevchanged == mtip:
 			#Obviously we have to allow anything at all to connect on to the very beginning.
 			if mtip:
 				#And of course we have the exception for linking to the back
-				if self.getChainBackPointer()==id:
+				if self.getChainBackPointer(chain)==id:
 					raise ValueError("New records must connect to the previous modified value")
 		
-		tip = self.getChainTip()
+		tip = self.getChainTip(chain)
 		
 		if not prev ==tip:
-			if not self.getRecordById(id):
+			if not self.getRecordById(id,chain):
 				#Tip is 0, we can start anywhere
 				if tip:
 					#Also, we can append to the back
-					if self.getChainBackPointer()==id:
+					if self.getChainBackPointer(chain)==id:
 						raise ValueError("New records must modify an existing entry, or append to one of the ends")
 				
 				
 		with self.conn:
-			self.conn.execute("DELETE FROM record WHERE id=?",(id,))
-			self.conn.execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?)",(id,key,value,h,modified,prev,prevchanged, signature))
+			self.conn.execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
+			self.conn.execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(id,key,value,h,modified,prev,prevchanged, signature,chain))
 			#Check if this comm
 			if oldPrev:
 				if not oldPrev==prev:
 					#If we changed prev we need to garbage collect the unreachable node.
-					hasRecordBeenDeleted(oldPrev)
+					hasRecordBeenDeleted(oldPrev,chain)
 					
 	def __setitem__(self,k, v):
 		k,v=self.filterInsert(k,v)
@@ -240,12 +321,10 @@ class DrayerStream():
 		if id==None:
 			raise KeyError(k)
 		
-		id,key,value,h,mtime,prev,prevmtime,sig= self.getRecordById(id)
-		self.checkSignature(id, key,h, mtime,prev,prevmtime,sig)
-		if not libnacl.crypto_generichash(value)==h:
-			raise RuntimeError("Bad hash in database")
-		if not self.hasRecordBeenDeleted(id):
-			return self.filterGet(value)
+		id,key,value,h,mtime,prev,prevmtime,sig,chain= self.getRecordById(id)
+		self.validateRecord(id,chain)
+		
+		return self.filterGet(value)
 		
 		
 	
@@ -270,71 +349,71 @@ class DrayerStream():
 		sendsock.sendto(("record\n"+b64encode(self.pubkey).decode("utf8")+"\n"+str(d)+"\n"+str(http_port)).encode("utf8"), addr)
 	
 	
-	def hasRecordBeenDeleted(self,id):
+	def hasRecordBeenDeleted(self,id,chain=b""):
 		"Returns True, and also deletes the record for real, if it should be garbage collected because its unreachable"
 		#The chain tip is obviously still good
-		t = self.getChainTip()
+		t = self.getChainTip(chain)
 		if id==t:
 			return False
 	
 		#Something still refers to it
-		if self.hasReferrent(id):
+		if self.hasReferrent(id,chain):
 			return False
 		
 		#Delete the record for real, so it doesn't trouble us anymore
-		self.conn.execute("DELETE FROM record WHERE id=?",(id,))
+		self.conn.execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
 		return True
 		
 	
-	def hasReferrent(self,id):
+	def hasReferrent(self,id,chain=b''):
 		"Returns true if a block in the chain references the given ID"
 		c=self.conn.cursor()
-		c.execute("SELECT * FROM record WHERE prev=?",(id,))
+		c.execute("SELECT * FROM record WHERE prev=? AND chain=?",(id,chain))
 		return c.fetchone()	
 		
-	def getPrev(self,id):
+	def getPrev(self,id,chain=b''):
 		"Returns the previous block in the chain"
 		c=self.conn.cursor()
-		c.execute("SELECT prev FROM record WHERE prev=?",(id,))
+		c.execute("SELECT prev FROM record WHERE prev=? AND chain=?",(id,chain))
 		x= c.fetchone()
 		if x:
 			return x[0]
 		return 0
 			
-	def getRecordById(self,id):
+	def getRecordById(self,id,chain=b''):
 		c=self.conn.cursor()
-		c.execute("SELECT * FROM record WHERE id=?",(id,))
+		c.execute("SELECT * FROM record WHERE id=? AND chain=?",(id,chain))
 		return c.fetchone()
 			
-	def getChainTip(self):
+	def getChainTip(self,chain=b''):
 		"Gets the record at the tip of the record chain"
 		c=self.conn.cursor()
-		c.execute("SELECT id FROM record ORDER BY id DESC")
+		c.execute("SELECT id FROM record WHERE chain=? ORDER BY id DESC",(chain,))
 		x=c.fetchone()
 		if not x==None:
 			return x[0]
 		return 0
 		
-	def getChainBackPointer(self):
+	def getChainBackPointer(self,chain=b""):
 		"Gets whatever the back record is pointing to. If it's not 0, we don't have full history"
 		c=self.conn.cursor()
-		c.execute("SELECT prev FROM record ORDER BY id ASC")
+		c.execute("SELECT prev FROM record WHERE chain=? ORDER BY id ASC",(chain,))
 		x=c.fetchone()
 		if not x==None:
 			return x[0]
 		return 0
 		
 	def getRecordsSince(self,t):
-		"Gets the cursor that can iterate over a certain number of records"
+		"Gets the cursor that can iterate over a certain number of records. Returns records for all chains"
 		c=self.conn.cursor()
 		c.execute("SELECT * FROM record WHERE modified>? ORDER BY id ASC",(t,))
 		return c
 
 
-	def getModifiedTip(self):
+	def getModifiedTip(self,chain=b""):
 		"Get the most recently modified records's modified time"
 		c=self.conn.cursor()
-		c.execute("SELECT modified FROM record ORDER BY id DESC")
+		c.execute("SELECT modified FROM record WHERE chain=? ORDER BY id DESC",(chain,))
 		x=c.fetchone()
 		if x:
 			return x[0]
@@ -414,6 +493,7 @@ def drayerUDPListener():
 					
 						
 networkThread = threading.Thread(target=drayerUDPListener, daemon=True)
+networkThread.daemon=True
 networkThread.start()
 
 def startServer():

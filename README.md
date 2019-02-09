@@ -18,6 +18,11 @@ is not even pre-alpha.
 
 ## Using it!
 
+Dependancies:
+Python3, upnpclient(unused right now but will be needed), requests, cherrypy,libnacl
+
+All are available with pip3 install.
+
 Making a new stream:
 ```python
 	import drayer
