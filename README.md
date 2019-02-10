@@ -55,6 +55,28 @@ time.sleep(2)
 print(d2["foo3"])
 ```
 
+## Top level functions
+
+### startBittorent()
+Start a Mainline DHT node. Preferrably, don't use this for nodes that will only be briefly online.
+
+Instead, it's best to run an always-on server with local discovery enabled.
+
+## The DrayerStream
+
+### setPrimaryServers(s):
+Input must be list of dicts with the key type="html" and "url" = the HTTP sync url for that server.
+
+Drayer will use those and ignore other servers if it can. Note that the list of primary servers is stored
+as a record directly in the chain, so all nodes that mirror it will get the same list.
+
+
+
+### announceDHT():
+Makes the stream findable via MainlineDHT. Don't use this unless you plan to have the node online for at least a few hours.
+
+Requires that drayer.startServer() and drayer.startBittorent() be called.
+
 
 ## How it works
 
@@ -79,6 +101,48 @@ unsorted collection of records that can be mirrored individually.
 
 You will not know if a block has been deleted if you don't download a more complete chain to see if there's still
 references, but this doesn't matter in some use cases.
+
+
+
+### Missing Block Problem, and Solution
+
+There's just a few problems with all that though, and that's mainly the fact that the next block in the modified
+chain could get deleted, and we might have no idea, and we'd wait forever to find a block that doesn't exist.
+
+
+However this isn't actually much of an issue, with a few small modifications.
+
+Suppose the source has blocks 1,2,and 3(In order of the modified chain), and a mirror has an copy.
+
+You have block 1. The source changes block 2. In the modified chain, block 2 becomes block 4.
+
+Block 3 is now invalid, because the date that 3 points to no longer exists. 
+
+To solve this, It changes the modified date of 3 to point to 1, but does not change the modification date of 3.
+
+
+
+If you sync with the mirror, you will get block the old block 2, then block 3, then presumably eventually block 4, which will overwrite
+2, and nobody will care about the previous stuff, because the chain is only one block.
+
+If you sync with the original, you will get block 3(Silently patched to point at 1), and you will never know that 2 existed.
+
+As well you should not, because it's no longer relevant.
+
+
+If you sync with the mirror up to block 2, and then try to sync with the server, you will get block 2, but then the server will
+give you block 3, which points at one. To make this work, we allow new blocks to connect to existing parts of the chain, "cutting them out".
+
+In this way we can edit things without changing the modified time, because we don't actually need to propagate that change.
+Everything just goes on as usual even if the chain is broken, so long as the front part of the chain is valid.
+
+### Replay attacks
+
+We do not want those on our chains. So we disallow inserting records that have a modified date before the tip of the modified chain.
+
+The exception is for partial mirrors, if they "connect" to the very back of the modified chain. In this special case we treat the
+back as another chain going backwards.
+
 
 
 
@@ -158,28 +222,8 @@ It is acceptable to omit the val key for large files, to only transfer metadata.
 
 
 ### DrayerUDP
-Drayer has several means of discovery. The primary one being DrayerUDP, a LAN based multicasting protocol that allows
-nodes to ask for any new records in nearby blocks, and to inform nearby nodes about changes to blocks.
+Drayer has several means of discovery. The primary one being DrayerUDP, a LAN based multicasting protocol that uses msgpack.
 
-This protocol is very simple, consting of newline separated text, with two commands at the moment.
-
-To announce a record:
-`
-record
-<b64encoded pubkey of stream>
-<ascii base10 modified timestamp of record>
-<port number of HTTP server to get said record>
-`
-The server should have the DrayerHTTP interface mounted at / on it's tree.
-
-
-To look for new records in a chain:
-`
-getRecordsSince
-<b64encoded pubkey of stream>
-<ascii base10 modified timestamp of the tip of your local modified chain>
-`
-Everyone with records newer than this should unicast you back a record packet representing the latest.
 
 All multicast traffic should use group: 224.7.130.8 and port: 15723
 

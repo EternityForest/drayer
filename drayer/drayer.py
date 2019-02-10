@@ -1,5 +1,5 @@
 
-import libnacl,os,sqlite3,struct,time,weakref,msgpack,requests, socket,threading,select,urllib,random
+import libnacl,os,sqlite3,struct,time,weakref,msgpack,requests, socket,threading,select,urllib,random,traceback
 
 from base64 import b64decode, b64encode
 
@@ -80,7 +80,14 @@ class DrayerStream():
 		self.fn = fn
 		
 		self.noServe = noServe
-	
+		
+		self.lastSynced = 0
+		self.lastDHTAnnounce =0 
+		
+		#Keep track of which of the primary servers we sync with,
+		#if there are any
+		self.selectedServer= None
+
 		if fn:
 			self.conn=sqlite3.connect(fn)
 			self.conn.row_factory = sqlite3.Row
@@ -144,45 +151,87 @@ class DrayerStream():
 		return struct.pack("<QqqqL", id,modified,prev, prevchanged,len(key))+key.encode("utf8")+h
 	
 	def makeSignature(self, id,key, h, modified, prev,prevchanged,chain=None):
+		if not chain == self.pubkey:
+			if chain:
+				raise ValueError("Can only sign messages on the local chain")
 		d = self.getBytesForSignature(id,key,h, modified, prev,prevchanged)
-		return libnacl.crypto_sign_detached(d, chain or self.privkey)
-		
+		return libnacl.crypto_sign_detached(d, self.privkey)
 		
 	
+	def setPrimaryServers(self, servers):
+		self["__drayer_primary_servers__"] = msgpack.packb(servers)
+		
+	def getPrimaryServers(self):
+		#Returns a list of trusted primary servers.
+		#When syncing, we should sync to one of them.
+		return msgpack.unpackb(self["__drayer_primary_servers__"])
+		
 	def sync(self,url=None):
 		"""Syncs with a remote server"""
-		if url:
-			if url.startswith("http"):
-				self.httpSync(url)
+		#Don't sync too often
+		if self.lastSynced>(time.time()-60):
+			return
+		self.lastSynced = time.time()
 		
+		inserted = 0
 		
-		if torrentServer:
-			bthash=libnacl.crypto_generichash(self.pubkey)
-			bthash=libnacl.crypto_generichash(bthash)[:20]			
-			#Sync with 5 random DHT nodes. We just hope that eventually we will
-			#get good data.
-			print("searching",bthash)
-			x = torrentServer.get_peers(bthash)
-			print(x)
-			if x:
-				for i in random.shuffle()[:5]:
-					print("Found BitTorrent node!",i)
-					try:
-						self.directHttpSync(ip,port)
-					except:
-						print(traceback.format_exc())
-					
-				
+		for chain in self.getSiblingChains():
+			if url:
+				if url.startswith("http"):
+					inserted+=self.httpSync(url,chain)
 			
-		if localDiscovery:
-			print("doing local discovery")
-			sendsock.sendto(("getRecordsSince\n"+b64encode(self.pubkey).decode("utf8")+"\n"+str(self.getModifiedTip())).encode("utf8"), (MCAST_GRP, MCAST_PORT))
-	
-	def directHttpSync(self,ip,port):
+			if not self.selectedServer:
+				try:
+					s =self.getPrimaryServers()
+					#Filter by what we know how to handle
+					s = {i:s[i] for i in s if s[i]["type"]=="http"}
+					self.selectedServer = random.choice(s)
+				except KeyError:
+					self.selectedServer = None
+				
+				
+			if self.selectedServer:
+				#If we can sync with a primary trusted server, we have no need to mess with
+				#random bittorrent DHT nodes that are probabl
+				try:
+					self.httpSync(self.selectedServer["url"],chain)
+					return
+				except:
+					#If it was unreachable, pick a new server
+					self.selectedServer=None
+					pass
+					
+			
+			if torrentServer:
+				bthash=libnacl.crypto_generichash(chain)
+				bthash=libnacl.crypto_generichash(bthash)[:20]			
+				#Sync with 5 random DHT nodes. We just hope that eventually we will
+				#get good data.
+				x = torrentServer.get_peers(bthash)
+				random.shuffle(x)
+				if x:
+					for i in x[:5]:
+						try:
+							inserted+=self.directHttpSync(i[0],i[1],chain)
+						except:
+							print(traceback.format_exc())
+						
+					
+			if localDiscovery:
+				sendsock.sendto(msgpack.packb({
+				"type":"getRecordsSince",
+				"chain":chain,
+				"time": self.getModifiedTip()}), (MCAST_GRP,MCAST_PORT))
+				
+			if inserted:
+				#If we actually got something reset the timer, there's might be more
+				self.lastSynced = 0
+				
+	def directHttpSync(self,ip,port,chain=b''):
 		"Use an ip port pair to sync"
-		self.httpSync("http://"+ip+":"+str(port))
+		return self.httpSync("http://"+ip+":"+str(port),chain)
 
-	def httpSync(self,url):
+	def httpSync(self,url,chain=b''):
 		"""Gets any updates that an HTTP server might have"""
 		if url.endswith("/"):
 			pass
@@ -193,7 +242,7 @@ class DrayerStream():
 		r = requests.get(
 				url+
 				"newRecords/"+
-				urllib.parse.quote_plus(b64encode(self.pubkey).decode("utf8"))+
+				urllib.parse.quote_plus(b64encode(chain or self.pubkey).decode("utf8"))+
 				"/"+str(self.getModifiedTip()
 			),stream=True)
 		r.raise_for_status()
@@ -204,20 +253,26 @@ class DrayerStream():
 		#Haven't needed to read siblings yet
 		siblings = None
 		
-		
+		inserted =0
 		for i in r:
 			if i[b'chain']:
 				if not siblings:
 					siblings=self.getSiblingChains()
-					
-			self.insertRecord(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],i[b'chain'])
-			
+				if not chain in siblings:
+					i[b'chain']
+			try:
+				self.insertRecord(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],i[b'chain'])
+			except:
+				print(traceback.format_exc())
+				return inserted
+			inserted+=1
+		return inserted
 			
 	def checkSignature(self, id,key,h, modified, prev,prevchanged, sig,chain=None):
 		d = self.getBytesForSignature(id,key,h, modified, prev,prevchanged)
 		return libnacl.crypto_sign_verify_detached(sig, d, chain or self.pubkey)
 		
-	def getSiblingChains():
+	def getSiblingChains(self):
 		"""Return a dict of all sibling chains, including ones referenced BY sibling chains that have not been synced yet.
 			dict entries returned as:
 			
@@ -234,11 +289,14 @@ class DrayerStream():
 			The actual DrayerSiblings record format is just a list of msgpack dicts.
 		"""	
 		
+		#TODO: actually implement this
+		return {self.pubkey:(0,0,0)}
+		
 		c=self.conn.cursor()
 		
 		#Note that we read from all siblings. The sibling of our sibling is also our sibling.
 		c.execute('SELECT id FROM record WHERE key="__drayer_siblings__"',(key,))
-		periods = {}
+		periods = {pubkey:{0,0,0}}
 		
 		#This is a really slow process of reading things. We probably need to cache this somehow.
 		for i in c:
@@ -272,6 +330,10 @@ class DrayerStream():
 			
 	def validateRecord(self,id, chain=b""):
 		##Make sure a record is actually supposed to be there
+		if chain:
+			if not chain in self.getSiblingChains():
+				raise RuntimeError("Record belongs to a chain that is not the local chain or a sibling")
+			
 		x = self.getRecordById(id,chain)
 		
 		h= libnacl.crypto_generichash(x["value"])
@@ -287,6 +349,10 @@ class DrayerStream():
 		
 		
 	def insertRecord(self, id,key,value, modified, prev,prevchanged, signature, chain=b""):
+		print("inserting",key, id, prev,modified,prevchanged)
+		if not chain in self.getSiblingChains():
+			if chain:
+				raise RuntimeError("Chain must be local chain or a sibling")
 		#Most basic test, make sure it's signed correctly
 		
 		#We don't supply a hash because we check it here anyway
@@ -298,32 +364,84 @@ class DrayerStream():
 		
 
 		mtip = self.getModifiedTip(chain)
-		if not prevchanged == mtip:
-			#Obviously we have to allow anything at all to connect on to the very beginning.
-			if mtip:
+		
+		#TODO:Back of chain connections
+		if modified<= mtip:
+			raise RuntimeError("Modified time cannot be before the tip of the chain")
+			
+		if not self.getRecordByModificationTime(prevchanged,chain):
+			#The new block has to connect SOMEWHERE on the chain but not necessearily 
+			#the end, so it can "patch stuff out".
+		
+			#Always allow the special case of the thing that's supposed to point at the very start,
+			#Imaginary block 0.
+			if prevchanged:
 				#And of course we have the exception for linking to the back
-				if self.getChainBackPointer(chain)==id:
-					raise ValueError("New records must connect to the previous modified value")
+				raise ValueError("New records must connect to an existing value in the mchain, or must connect to the back of the chain.")
 		
 		tip = self.getChainTip(chain)
 		
 		if not prev ==tip:
 			if not self.getRecordById(id,chain):
-				#Tip is 0, we can start anywhere
-				if tip:
-					#Also, we can append to the back
-					if self.getChainBackPointer(chain)==id:
-						raise ValueError("New records must modify an existing entry, or append to one of the ends")
-				
+				#Also, we can append to the back
+				if not self.getChainBackPointer(chain)==id:
+					raise ValueError("New records must modify an existing entry, or append to one of the ends")
+			
 				
 		with self.conn:
-			self.conn.execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
+			
+			
+			oldRecord = self.getRecordById(id, chain)
+			#If we are overwriting a record that had something pointing to it,
+			#We're going to silently patch what it pointed to, and we aren't going to tell anyone unless they ask.
+			
+			#See the readme for why we can get away with this. It's because past state of the modified
+			#chain doesn't matter, only the last block. Anyone getting new data gets the new,
+			#anyone else doesn't care
+			if oldRecord:				
+				n = self.getNextModifiedRecord(oldRecord["modified"])
+				if n:
+					p = oldRecord["prevchange"]
+					#Whatever is in front of us needs to point to what's behind us.
+					self.makeSignature(n["id"],n["key"],n["hash"],n["modified"],n["prev"],n["prevchange"],chain)
+					self.conn.execute("UPDATE record SET prevchange=? WHERE id=? AND chain=?",(p, n["id"], chain))
+				self.conn.execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
+				
 			self.conn.execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(id,key,value,h,modified,prev,prevchanged, signature,chain))
-			#Check if this comm
+			
+			
+			#Now, in a completely different chain, we se if anything has been "patched out" of it.
 			if oldPrev:
 				if not oldPrev==prev:
 					#If we changed prev we need to garbage collect the unreachable node.
-					hasRecordBeenDeleted(oldPrev,chain)
+					self.hasRecordBeenDeleted(oldPrev,chain)
+					
+					
+	def __delitem__(self,k):
+		id = self.getIdForKey(k)
+		with self.conn:
+			if not id:
+				raise KeyError(k)
+			n = self.getNextRecord(id)
+			
+			p = self.getPrev(id)
+			mtip = self.getModifiedTip()
+			
+			print("prev r", p)
+			print("next r", n["id"])
+			print("this r",id)
+			
+			#Make a new record for the one right in front of it.
+			#inserRecord will handle patching the one in front of *that*
+			if n:
+				t = int(time.time()*1000000)
+				sig=self.makeSignature(n["id"],n["key"], n["hash"],t,p,mtip)
+				self.insertRecord(n["id"],n["key"],n["value"], t,p, mtip,sig)
+			else:
+				raise NotImplemented("Currently we cannot delete the very most recent item, but you can add another and try again.")
+			
+		
+			
 					
 	def __setitem__(self,k, v):
 		k,v=self.filterInsert(k,v)
@@ -362,16 +480,29 @@ class DrayerStream():
 	def filterGet(self,v):
 		return v
 		
-	def advertiseOnBittorent(self):
+	def announceDHT(self,allChains=False):
+		"Advertise this node on bittorrent"
+		
+		self.enable_dht = True
+		
+		#Rate limiting logic
+		if self.lastDHTAnnounce>(time.time()-5*60):
+			return
+		self.lastDHTAnnounce = time.time()
 		if self.noServe:
 			raise RuntimeError("noServe is enabled for this object. Perhaps you meant to advertise from the main thread?")
+
+
+		l = [self.pubkey]
+		if allChains:
+			l=self.getSiblingChains()
+		for i in l:
+			bthash=libnacl.crypto_generichash(i)
+			bthash=libnacl.crypto_generichash(bthash)[:20]
 			
-		bthash=libnacl.crypto_generichash(self.pubkey)
-		bthash=libnacl.crypto_generichash(bthash)[:20]
-		
-		if torrentServer:
-			print("advertizing", bthash)
-			torrentServer.announce_peer(bthash, http_port,0,False)
+			if torrentServer:
+				torrentServer.get_peers(bthash)
+				torrentServer.announce_peer(bthash, http_port,0,False)
 			
 		
 	def getIdForKey(self, key):
@@ -382,21 +513,36 @@ class DrayerStream():
 		if x:
 			return x[0]
 			
-	def broadcastUpdate(self, addr= (MCAST_GRP,MCAST_PORT)):
+	def broadcastUpdate(self, addr= (MCAST_GRP,MCAST_PORT),chain=b""):
+		
 		"Anounce what the tip of the modified chain is, to everyone"
 		print("bcaststart")
+		
 		if not localDiscovery:
 			return
 			
 		#noServe has one special value Copy that enables this but dis
-		
 		if self.noServe==True:
 			return
-			
-		d = self.getModifiedTip()
-		print("to", addr)
-		sendsock.sendto(("record\n"+b64encode(self.pubkey).decode("utf8")+"\n"+str(d)+"\n"+str(http_port)).encode("utf8"), addr)
+		
+		i= self.getModifiedTipRecord(chain)
+		if not i:
+			return
+		chain = chain or self.pubkey
+		#sendsock.sendto(("record\n"+b64encode(self.pubkey).decode("utf8")+"\n"+str(d)+"\n"+str(http_port)).encode("utf8"), addr)
 	
+	
+		sendsock.sendto(msgpack.packb({"type":"record",
+				"hash":i["hash"],
+				"key":i["key"],
+				"id": i["id"],
+				"sig":i["signature"],
+				"prev":i["prev"],
+				"prevch":i["prevchange"],
+				"mod":i["modified"],
+				"httpport": http_port,
+				"chain":chain
+				}),addr)
 	
 	def hasRecordBeenDeleted(self,id,chain=b""):
 		"Returns True, and also deletes the record for real, if it should be garbage collected because its unreachable"
@@ -411,6 +557,7 @@ class DrayerStream():
 		
 		#Delete the record for real, so it doesn't trouble us anymore
 		self.conn.execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
+		print("Garbage collected")
 		return True
 		
 	
@@ -421,14 +568,41 @@ class DrayerStream():
 		return c.fetchone()	
 		
 	def getPrev(self,id,chain=b''):
-		"Returns the previous block in the chain"
+		"Returns the id of the previous block in the chain"
 		c=self.conn.cursor()
-		c.execute("SELECT prev FROM record WHERE prev=? AND chain=?",(id,chain))
+		c.execute("SELECT prev FROM record WHERE id=? AND chain=?",(id,chain))
 		x= c.fetchone()
 		if x:
 			return x[0]
 		return 0
-			
+		
+	def getNextRecord(self,id,chain=b''):
+		"Returns the previous block in the chain"
+		c=self.conn.cursor()
+		c.execute("SELECT * FROM record WHERE prev=? AND chain=?",(id,chain))
+		x= c.fetchone()
+		if x:
+			return x
+		return 0	
+
+	def getNextModifiedRecord(self,t,chain=b''):
+		"Returns the next block in the modified chain"
+		c=self.conn.cursor()
+		c.execute("SELECT * FROM record WHERE prevchange=? AND chain=?",(t,chain))
+		x= c.fetchone()
+		if x:
+			return x
+		return None
+	
+	def getRecordByModificationTime(self,t,chain=b''):
+		"Returns the next block in the modified chain"
+		c=self.conn.cursor()
+		c.execute("SELECT * FROM record WHERE modified=? AND chain=?",(t,chain))
+		x= c.fetchone()
+		if x:
+			return x
+		return 0	
+		
 	def getRecordById(self,id,chain=b''):
 		c=self.conn.cursor()
 		c.execute("SELECT * FROM record WHERE id=? AND chain=?",(id,chain))
@@ -468,6 +642,13 @@ class DrayerStream():
 			return x[0]
 		return 0
 		
+	def getModifiedTipRecord(self,chain=b""):
+		"Get the most recently modified records's modified time"
+		c=self.conn.cursor()
+		c.execute("SELECT * FROM record WHERE chain=? ORDER BY id DESC",(chain,))
+		x=c.fetchone()
+		if x:
+			return x
 		
 	def savePK(self):
 		if self.fn:
@@ -495,20 +676,67 @@ class DrayerStream():
 fullSyncInterval = 7200
 lastDidFullSync= time.time()
 
+#When was the last time we re announced all nodes to the DHT?
+lastDidAnnounce=time.time()
+
+def isLocal(i):
+	if i.startswith("192."):
+		return True
+	if i.startswith("10."):
+		return True
+	if i.startswith("127."):
+		return True
+	if i.startswith("192.168"):
+		return True
+	if i.startswith("172."):
+		x= int(i.split(".")[1])
+		if x<16:
+			return False
+		if x>31:
+			return False
+		return True
+	if i.startswith("fd"):
+		return True
+	if i.startswith("fc"):
+		return True
+		
+	return False
+		
+
+
+
 def drayerServise():
-	global lastDidFullSync
+	global lastDidFullSync,lastDidAnnounce
 	
 	while 1:
 		#This failing is just a normal expected thing. We won't always be able to access everything.
 		try:
 			if time.time()-lastDidFullSync>fullSyncInterval:
+				lastDidFullSync=time.time()
 				for i in _allStreams:
 					try:
 						i.sync()
 					except:
-						pass
+						print(traceback.format_exc())
+
 		except:
-			pass
+			print(traceback.format_exc())
+
+		
+		#Redo DHT announce every ten minutes for all nodes that need it
+		try:
+			if time.time()-lastDidAnnounce>10*60:
+				lastDidAnnounce = time.time()
+				for i in _allStreams:
+					try:
+						if i.enable_dht:
+							i.announceDHT()
+					except:
+						print(traceback.format_exc())
+
+		except:
+			print(traceback.format_exc())
+
 		
 		#Past this point is LAN stuff
 		if not localDiscovery:
@@ -518,47 +746,51 @@ def drayerServise():
 		rd,w,x= select.select([sendsock,listensock],[],[], 30)
 		for i in rd:
 			b, addr = i.recvfrom(64000)
-			print(b)
 			
-			d = b.decode("utf8").split("\n")
-			
-			"""
-			getRecordsSince
-			PUBKEY
-			time
-			"""
-			#response
-			"""
-			record
-			PUBKEY
-			timestamp
-			HTTP PORT
-			"""
-			
-			if d[0] == "getRecordsSince":
-				if b64decode(d[1]) in _allStreams:
-					try:
+			try:
+				d=msgpack.unpackb(b)				
+				if d[b"type"] == b"getRecordsSince":
+					if d[b"chain"] in _allStreams:
+						try:
+							x= _allStreams[d[b"chain"]].getThreadCopy()	
+							#Internally we use empty strings to mean the local chain	
+							if	d[b"chain"] == x.pubkey:
+								chain = b''
+							else:
+								chain = d[b"chain"]
+							h = x.getModifiedTip(chain)
+							if h==None:
+								continue
+							if h>d[b"time"]:
+								x.broadcastUpdate(addr)
+						finally:
+							del x
+							
+				if d[b"type"] == b"record":
+					#If we allowed random people on the internet to tell us to make HTTP
+					#requests we'd be the perfect DDoS amplifier
+					#So we block anything that isn't local.
+					if not isLocal(addr[0]):
+						continue
 						
-						x= _allStreams[b64decode(d[1])].getThreadCopy()			
-						h = x.getRecordsSince(int(d[2])).fetchone()
-						if not h:
-							continue
-						h = h["modified"]
-						
-						x.broadcastUpdate(addr)
-					finally:
-						del x
-						
-			if d[0] == "record":
-				print(d)
-				if b64decode(d[1]) in _allStreams:
-					try:
-						x= _allStreams[b64decode(d[1])].getThreadCopy()
-						if int(d[2])> x.getModifiedTip():
-							x.sync("http://"+addr[0]+":"+d[3])
-					finally:
-						del x
-					
+					if d[b"chain"] in _allStreams:
+						try:
+
+								
+							x= _allStreams[d[b"chain"]].getThreadCopy()
+							
+							#Internally we use empty strings to mean the local chain	
+							if	d[b"chain"] == x.pubkey:
+								chain = b''
+							else:
+								chain = d[b"chain"]
+								
+							if d[b"mod"]> x.getModifiedTip():
+								x.httpSync("http://"+addr[0]+":"+str(d[b"httpport"]),chain)
+						finally:
+							del x
+			except:
+				print(traceback.format_exc())
 
 
 thr = threading.Thread(target=drayerServise, daemon=True)
@@ -570,8 +802,14 @@ def startLocalDiscovery():
 	global localDiscovery
 	localDiscovery = True
 
+
+isRouterPortOpen = False
+
 def openRouterPort():
 	"Open a port on the local router, making cherrypy's HTTP server TOTALLY PUBLIC"
+	global isRouterPortOpen
+	isRouterPortOpen = True
+	
 	from . import handleupnp
 	handleupnp.addMapping(http_port, "TCP", "Drayer HTTP protocol")
 
