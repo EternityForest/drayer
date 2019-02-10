@@ -261,7 +261,11 @@ class DrayerStream():
 				if not chain in siblings:
 					i[b'chain']
 			try:
-				self.insertRecord(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],i[b'chain'])
+				#Internal compressed representation
+				c = i[b'chain']
+				if c==self.pubkey:
+					c=b''
+				self.insertRecord(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],c)
 			except:
 				print(traceback.format_exc())
 				return inserted
@@ -353,6 +357,10 @@ class DrayerStream():
 		if not chain in self.getSiblingChains():
 			if chain:
 				raise RuntimeError("Chain must be local chain or a sibling")
+		
+		if chain==self.pubkey:
+			chain=b''
+			
 		#Most basic test, make sure it's signed correctly
 		
 		#We don't supply a hash because we check it here anyway
@@ -389,8 +397,6 @@ class DrayerStream():
 			
 				
 		with self.conn:
-			
-			
 			oldRecord = self.getRecordById(id, chain)
 			#If we are overwriting a record that had something pointing to it,
 			#We're going to silently patch what it pointed to, and we aren't going to tell anyone unless they ask.
@@ -399,14 +405,15 @@ class DrayerStream():
 			#chain doesn't matter, only the last block. Anyone getting new data gets the new,
 			#anyone else doesn't care
 			if oldRecord:				
-				n = self.getNextModifiedRecord(oldRecord["modified"])
+				n = self.getNextModifiedRecord(oldRecord["modified"],chain)
 				if n:
 					p = oldRecord["prevchange"]
 					#Whatever is in front of us needs to point to what's behind us.
-					self.makeSignature(n["id"],n["key"],n["hash"],n["modified"],n["prev"],n["prevchange"],chain)
-					self.conn.execute("UPDATE record SET prevchange=? WHERE id=? AND chain=?",(p, n["id"], chain))
+					sig=self.makeSignature(n["id"],n["key"],n["hash"],n["modified"],n["prev"],n["prevchange"],chain)
+					self.conn.execute("UPDATE record SET prevchange=?,signature=? WHERE id=? AND chain=?",(p, sig,n["id"], chain))
 				self.conn.execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
-				
+			
+			
 			self.conn.execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(id,key,value,h,modified,prev,prevchanged, signature,chain))
 			
 			
@@ -422,23 +429,39 @@ class DrayerStream():
 		with self.conn:
 			if not id:
 				raise KeyError(k)
+				
+			#The record that references us in the actual chain
+			#That we are going to patch to not do that
 			n = self.getNextRecord(id)
 			
+			if not n:
+				#The block tip can's be GCed so we can't delete it
+				raise RuntimeError("Currently we cannot delete the very most recently added item, but you can add another and try again.")
+
 			p = self.getPrev(id)
 			mtip = self.getModifiedTip()
 			
-			print("prev r", p)
-			print("next r", n["id"])
-			print("this r",id)
+			torm = self.getRecordById(id)
+			
+			#We cannot have a record that connects to itself...
+			if mtip == n["modified"]:
+				mtip =n['prevchange']
+			
+			#Can't connect to the one we're about to delete either
+			if mtip== torm['modified']:
+				x = self.getRecordByModificationTime(torm["prevchange"])
+				if not x:
+					if not torm["prevchange"]==0:
+						#There would be nothing for the record to connect to!
+						raise RuntimeError("Can't remove that record")
+				mtip=torm["prevchange"]
+			
 			
 			#Make a new record for the one right in front of it.
-			#inserRecord will handle patching the one in front of *that*
-			if n:
-				t = int(time.time()*1000000)
-				sig=self.makeSignature(n["id"],n["key"], n["hash"],t,p,mtip)
-				self.insertRecord(n["id"],n["key"],n["value"], t,p, mtip,sig)
-			else:
-				raise NotImplemented("Currently we cannot delete the very most recent item, but you can add another and try again.")
+			#insertRecord will handle patching the one in front of *that*
+			t = int(time.time()*1000000)
+			sig=self.makeSignature(n["id"],n["key"], n["hash"],t,p,mtip)
+			self.insertRecord(n["id"],n["key"],n["value"], t,p, mtip,sig)
 			
 		
 			
@@ -715,7 +738,7 @@ def drayerServise():
 				lastDidFullSync=time.time()
 				for i in _allStreams:
 					try:
-						i.sync()
+						_allStreams[i].sync()
 					except:
 						print(traceback.format_exc())
 
@@ -729,8 +752,8 @@ def drayerServise():
 				lastDidAnnounce = time.time()
 				for i in _allStreams:
 					try:
-						if i.enable_dht:
-							i.announceDHT()
+						if _allStreams[i].enable_dht:
+							_allStreams[i].announceDHT()
 					except:
 						print(traceback.format_exc())
 
