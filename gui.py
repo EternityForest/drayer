@@ -7,9 +7,13 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.popup import Popup
 from kivy.uix.filechooser import FileChooserIconView
+from kivy.uix.recycleview import RecycleView
+
+
 
 
 import drayer, sys, os,time
+import rv
 
 try:
 	db = drayer.DrayerStream(sys.argv[1])
@@ -40,25 +44,67 @@ def FilePopup(x):
 	button.bind(on_press=popup.dismiss)
 	popup.open()
 
+def getPublicSocialposts():
+	c = db.getConn().cursor()
+	c.execute('SELECT key,value FROM record WHERE key LIKE "PublicSocialPost%"')
+	return c
+
+
+def rl():
+	pass
+	
+
+rlfun = rl
+
 class MyApp(App):
 
 	def build(self):
 		layout = BoxLayout(orientation='vertical')
-		
+		body = BoxLayout(orientation='horizontal')
+
+		c1 = BoxLayout(orientation='vertical')
+		c2 = BoxLayout(orientation='vertical')
 		sel = Button(text='Select a File', font_size=14, size_hint=(1,0.1))
+		layout.add_widget(sel)
+		layout.add_widget(body)
+
+			
+		body.add_widget(c1)
+		body.add_widget(c2)
+		
+	
 
 		newpost = TextInput()
-		button = Button(text='Post!', font_size=14, size_hint=(1,0.2))
+		submit = Button(text='Post!', font_size=14, size_hint=(1,0.2))
+				
+		c1.add_widget(newpost)
+		c1.add_widget(submit)
 		
-		layout.add_widget(sel)
+		allposts = rv.RV()
 
-		layout.add_widget(newpost)
-		layout.add_widget(button)
+		c2.add_widget(allposts)
+		
+		def rf():
+			d = []
+			for i in getPublicSocialposts():
+				k=i["key"].split("_",2)
+				t = 12345
+				try:
+					t = float(k[1])
+					title=k[2]
+				except:
+					title="Untitled"
+				d.append({"text":time.strftime("%Y %b %d %I:%M%p",time.gmtime(t))+"\n"+title})
+			allposts.data = d
+			
+		allposts.data=[{"text":"foo"}, {"text":"bar"}]
+		rf()
+
 		
 		def post(instance):
-			db["PublicSocialPost_"+str(time.time())] = newpost.text
+			db["PublicSocialPost_"+str(time.time())+"_title"] = newpost.text
 
-		button.bind(on_press=post)
+		submit.bind(on_press=post)
 		sel.bind(on_press=FilePopup)
 		
 		return layout
