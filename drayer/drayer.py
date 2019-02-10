@@ -37,7 +37,7 @@ class DrayerWebServer(object):
 		"Returns a msgpacked list of new records"
 		cherrypy.response.headers['Content-Type']="application/octet-stream"
 		t = int(t)
-		c = _allStreams[b64decode(streampk)].getThreadCopy().getRecordsSince(t)
+		c = _allStreams[b64decode(streampk)].getRecordsSince(t)
 		limit = 100
 		l = []
 		for i in c:
@@ -87,6 +87,8 @@ class DrayerStream():
 		#Keep track of which of the primary servers we sync with,
 		#if there are any
 		self.selectedServer= None
+		
+		self.tloc = threading.local()
 
 		if fn:
 			self.conn=sqlite3.connect(fn)
@@ -140,11 +142,14 @@ class DrayerStream():
 			if noServe==False:
 				_allStreams[self.pubkey] = self
 	
-	
-	def getThreadCopy(self):
-		"Returns another DrayerStream that should be open to the same db"
-		return DrayerStream(self.fn,self.pubkey,True if self.noServe else "copy")
-	
+	def getConn(self):
+		try:
+			return self.tloc.conn
+		except:
+			self.tloc.conn=sqlite3.connect(self.fn)
+			self.tloc.conn.row_factory = sqlite3.Row
+			return self.tloc.conn
+
 	
 	def getBytesForSignature(self, id,key,h, modified, prev,prevchanged):
 		#This is currently the definition of how to make a signature
@@ -275,7 +280,23 @@ class DrayerStream():
 	def checkSignature(self, id,key,h, modified, prev,prevchanged, sig,chain=None):
 		d = self.getBytesForSignature(id,key,h, modified, prev,prevchanged)
 		return libnacl.crypto_sign_verify_detached(sig, d, chain or self.pubkey)
-		
+	
+	def isSiblingAtTime(self,chain,t):
+		"Return true if the given chain was considered a sibling at the given time"
+		if chain==b"":
+			#Local chain is always in the set
+			return True
+		c = self.getSiblingChains()
+		if chain in c:
+			if time.time()>=c[chain][1]:
+				#non expiring
+				if not c[chain][2]:
+					return True
+					
+				if time.time()<=c[chain][2]:
+					return True
+					
+				
 	def getSiblingChains(self):
 		"""Return a dict of all sibling chains, including ones referenced BY sibling chains that have not been synced yet.
 			dict entries returned as:
@@ -289,18 +310,18 @@ class DrayerStream():
 			that there are no period entries older than that which are still valid.
 			
 			To make things easier, only one period per key.
-			
+			Sibl
 			The actual DrayerSiblings record format is just a list of msgpack dicts.
 		"""	
 		
 		#TODO: actually implement this
-		return {self.pubkey:(0,0,0)}
 		
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		
 		#Note that we read from all siblings. The sibling of our sibling is also our sibling.
-		c.execute('SELECT id FROM record WHERE key="__drayer_siblings__"',(key,))
-		periods = {pubkey:{0,0,0}}
+		c.execute('SELECT id FROM record WHERE key="__drayer_siblings__"')
+		#We're always included in our own
+		periods = {self.pubkey:{0,0,0}}
 		
 		#This is a really slow process of reading things. We probably need to cache this somehow.
 		for i in c:
@@ -308,19 +329,19 @@ class DrayerStream():
 			#Get all the records
 			value = msgpack.unpackb(i["value"])
 			for j in value:
-				if j["pubkey"] in periods:
-					if j["timestamp"] > periods[j["pubkey"]]["timestamp"]:
-							periods[j["pubkey"]] = j
+				if j[b"pubkey"] in periods:
+					if j[b"timestamp"] > periods[j[b"pubkey"]][b"timestamp"]:
+							periods[j[b"pubkey"]] = j
 				else:
-					periods[i["pubkey"]] = j
+					periods[i[b"pubkey"]] = j
 			torm=[]
 		
 		#After we have everything, delete the 
 		#Records that have been deleted by COMPLETEs.
 		for j in periods:
-			if periods[j]["pubkey"]== b'COMPLETE':
+			if periods[j][b"pubkey"]== b'COMPLETE':
 				for k in periods:
-					if periods[k]["timestamp"]< periods["j"]["timestamp"]:
+					if periods[k][b"timestamp"]< periods[j][b"timestamp"]:
 						torm.append(k)
 		for i in torm:
 			del periods[i]
@@ -329,17 +350,16 @@ class DrayerStream():
 		#which we then write back to the main chain
 		
 		
-		return {i:(periods[i]["timestamp"], periods[i]["from"],periods[i]["to"]) for i in periods}
+		return {i:(periods[i][b"timestamp"], periods[i][b"from"],periods[i][b"to"]) for i in periods}
 						
 			
 	def validateRecord(self,id, chain=b""):
 		##Make sure a record is actually supposed to be there
-		if chain:
-			if not chain in self.getSiblingChains():
-				raise RuntimeError("Record belongs to a chain that is not the local chain or a sibling")
-			
 		x = self.getRecordById(id,chain)
 		
+		if not self.isSiblingAtTime(x["chain"],x["modified"]):
+			raise RuntimeError("Record belongs to a chain that is/was not the local chain or a sibling when it was made")
+
 		h= libnacl.crypto_generichash(x["value"])
 		if not h==x["hash"]:
 			raise RuntimeError("Bad Hash")
@@ -354,8 +374,10 @@ class DrayerStream():
 		
 	def insertRecord(self, id,key,value, modified, prev,prevchanged, signature, chain=b""):
 		print("inserting",key, id, prev,modified,prevchanged)
-		if not chain in self.getSiblingChains():
-			if chain:
+		
+		#TODO: Removing peers is super confusing. We'll refuse to add any more to their chains.
+		#But if there's already messages will there be race conditions?
+		if not self.isSiblingAtTime(chain, modified):
 				raise RuntimeError("Chain must be local chain or a sibling")
 		
 		if chain==self.pubkey:
@@ -396,7 +418,7 @@ class DrayerStream():
 					raise ValueError("New records must modify an existing entry, or append to one of the ends")
 			
 				
-		with self.conn:
+		with self.getConn():
 			oldRecord = self.getRecordById(id, chain)
 			#If we are overwriting a record that had something pointing to it,
 			#We're going to silently patch what it pointed to, and we aren't going to tell anyone unless they ask.
@@ -410,11 +432,11 @@ class DrayerStream():
 					p = oldRecord["prevchange"]
 					#Whatever is in front of us needs to point to what's behind us.
 					sig=self.makeSignature(n["id"],n["key"],n["hash"],n["modified"],n["prev"],n["prevchange"],chain)
-					self.conn.execute("UPDATE record SET prevchange=?,signature=? WHERE id=? AND chain=?",(p, sig,n["id"], chain))
-				self.conn.execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
+					self.getConn().execute("UPDATE record SET prevchange=?,signature=? WHERE id=? AND chain=?",(p, sig,n["id"], chain))
+				self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
 			
 			
-			self.conn.execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(id,key,value,h,modified,prev,prevchanged, signature,chain))
+			self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(id,key,value,h,modified,prev,prevchanged, signature,chain))
 			
 			
 			#Now, in a completely different chain, we se if anything has been "patched out" of it.
@@ -426,7 +448,7 @@ class DrayerStream():
 					
 	def __delitem__(self,k):
 		id = self.getIdForKey(k)
-		with self.conn:
+		with self.getConn():
 			if not id:
 				raise KeyError(k)
 				
@@ -485,15 +507,20 @@ class DrayerStream():
 		self.broadcastUpdate()
 		
 	def __getitem__(self,k):
-		id = self.getIdForKey(k)
-		if id==None:
-			raise KeyError(k)
+		e = None
+		#There could be multiple records for a key.
+		#We should have deleted expired ones, but it may be that a no-longer-valid
+		#Sibling has recent keys that will fail vaildation, and we want to return to our own verision
 		
-		id,key,value,h,mtime,prev,prevmtime,sig,chain= self.getRecordById(id)
-		self.validateRecord(id,chain)
-		
-		return self.filterGet(value)
-		
+		#So we try records till we get a valid one
+		for i in self.getRecordsForKey(k):
+			try:
+				self.validateRecord(i["id"],i["chain"])
+				return self.filterGet(i["value"])
+			except Exception as q:
+				e=q
+			
+		raise e or KeyError(k)
 		
 	
 	def filterInsert(self,k,v):
@@ -530,11 +557,17 @@ class DrayerStream():
 		
 	def getIdForKey(self, key):
 		"Returns the ID of the most recent record with a given key"
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		c.execute("SELECT id FROM record WHERE key=? ORDER BY modified desc",(key,))
 		x = c.fetchone()
 		if x:
 			return x[0]
+			
+	def getRecordsForKey(self, key):
+		"Returns all records for a key, most recent first"
+		c=self.getConn().cursor()
+		c.execute("SELECT * FROM record WHERE key=? ORDER BY modified desc",(key,))
+		return c
 			
 	def broadcastUpdate(self, addr= (MCAST_GRP,MCAST_PORT),chain=b""):
 		
@@ -579,20 +612,20 @@ class DrayerStream():
 			return False
 		
 		#Delete the record for real, so it doesn't trouble us anymore
-		self.conn.execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
+		self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
 		print("Garbage collected")
 		return True
 		
 	
 	def hasReferrent(self,id,chain=b''):
 		"Returns true if a block in the chain references the given ID"
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		c.execute("SELECT * FROM record WHERE prev=? AND chain=?",(id,chain))
 		return c.fetchone()	
 		
 	def getPrev(self,id,chain=b''):
 		"Returns the id of the previous block in the chain"
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		c.execute("SELECT prev FROM record WHERE id=? AND chain=?",(id,chain))
 		x= c.fetchone()
 		if x:
@@ -601,7 +634,7 @@ class DrayerStream():
 		
 	def getNextRecord(self,id,chain=b''):
 		"Returns the previous block in the chain"
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		c.execute("SELECT * FROM record WHERE prev=? AND chain=?",(id,chain))
 		x= c.fetchone()
 		if x:
@@ -610,7 +643,7 @@ class DrayerStream():
 
 	def getNextModifiedRecord(self,t,chain=b''):
 		"Returns the next block in the modified chain"
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		c.execute("SELECT * FROM record WHERE prevchange=? AND chain=?",(t,chain))
 		x= c.fetchone()
 		if x:
@@ -619,7 +652,7 @@ class DrayerStream():
 	
 	def getRecordByModificationTime(self,t,chain=b''):
 		"Returns the next block in the modified chain"
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		c.execute("SELECT * FROM record WHERE modified=? AND chain=?",(t,chain))
 		x= c.fetchone()
 		if x:
@@ -627,13 +660,13 @@ class DrayerStream():
 		return 0	
 		
 	def getRecordById(self,id,chain=b''):
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		c.execute("SELECT * FROM record WHERE id=? AND chain=?",(id,chain))
 		return c.fetchone()
 			
 	def getChainTip(self,chain=b''):
 		"Gets the record at the tip of the record chain"
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		c.execute("SELECT id FROM record WHERE chain=? ORDER BY id DESC",(chain,))
 		x=c.fetchone()
 		if not x==None:
@@ -642,7 +675,7 @@ class DrayerStream():
 		
 	def getChainBackPointer(self,chain=b""):
 		"Gets whatever the back record is pointing to. If it's not 0, we don't have full history"
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		c.execute("SELECT prev FROM record WHERE chain=? ORDER BY id ASC",(chain,))
 		x=c.fetchone()
 		if not x==None:
@@ -651,14 +684,14 @@ class DrayerStream():
 		
 	def getRecordsSince(self,t):
 		"Gets the cursor that can iterate over a certain number of records. Returns records for all chains"
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		c.execute("SELECT * FROM record WHERE modified>? ORDER BY id ASC",(t,))
 		return c
 
 
 	def getModifiedTip(self,chain=b""):
 		"Get the most recently modified records's modified time"
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		c.execute("SELECT modified FROM record WHERE chain=? ORDER BY id DESC",(chain,))
 		x=c.fetchone()
 		if x:
@@ -667,7 +700,7 @@ class DrayerStream():
 		
 	def getModifiedTipRecord(self,chain=b""):
 		"Get the most recently modified records's modified time"
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		c.execute("SELECT * FROM record WHERE chain=? ORDER BY id DESC",(chain,))
 		x=c.fetchone()
 		if x:
@@ -681,16 +714,16 @@ class DrayerStream():
 			os.chmod(self.fn+".privatekey", 0o600)
 
 	def getAttr(self,k):
-		c=self.conn.cursor()
+		c=self.getConn().cursor()
 		c.execute("SELECT value FROM attr WHERE key=?", (k,))
 		x=c.fetchone()
 		if x:
 			return x[0]
 			
 	def setAttr(self,k,v):
-		with self.conn:
-			self.conn.execute("DELETE FROM attr WHERE key=?",(k,))
-			self.conn.execute("INSERT INTO attr VALUES (?,?)",(k,v))
+		with self.getConn():
+			self.getConn().execute("DELETE FROM attr WHERE key=?",(k,))
+			self.getConn().execute("INSERT INTO attr VALUES (?,?)",(k,v))
 		 
 
 
@@ -738,7 +771,7 @@ def drayerServise():
 				lastDidFullSync=time.time()
 				for i in _allStreams:
 					try:
-						_allStreams[i].sync()
+						_allStreams[i]._serviceCopy().sync()
 					except:
 						print(traceback.format_exc())
 
@@ -753,7 +786,7 @@ def drayerServise():
 				for i in _allStreams:
 					try:
 						if _allStreams[i].enable_dht:
-							_allStreams[i].announceDHT()
+							_allStreams[i].serviceCopy().announceDHT()
 					except:
 						print(traceback.format_exc())
 
@@ -775,7 +808,7 @@ def drayerServise():
 				if d[b"type"] == b"getRecordsSince":
 					if d[b"chain"] in _allStreams:
 						try:
-							x= _allStreams[d[b"chain"]].getThreadCopy()	
+							x= _allStreams[d[b"chain"]]
 							#Internally we use empty strings to mean the local chain	
 							if	d[b"chain"] == x.pubkey:
 								chain = b''
@@ -800,7 +833,7 @@ def drayerServise():
 						try:
 
 								
-							x= _allStreams[d[b"chain"]].getThreadCopy()
+							x= _allStreams[d[b"chain"]]
 							
 							#Internally we use empty strings to mean the local chain	
 							if	d[b"chain"] == x.pubkey:
