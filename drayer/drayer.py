@@ -5,7 +5,7 @@ from base64 import b64decode, b64encode
 
 import cherrypy
 
-http_port = 33125
+http_port = random.randint(8000, 48000)
 
 MCAST_GRP = '224.7.130.8'
 MCAST_PORT = 15723
@@ -26,23 +26,74 @@ sendsock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, MULTICAST_TTL)
 sendsock.bind(("",0))
 
 
+import base64
+import re
+
+def decode_base64(data, altchars=b'+/'):
+    """Decode base64, padding being optional.
+
+    :param data: Base64 data as an ASCII byte string
+    :returns: The decoded byte string.
+
+    """
+    data = re.sub(r'[^a-zA-Z0-9%s]+' % altchars, '', data)  # normalize
+    missing_padding = len(data) % 4
+    if missing_padding:
+        data += '='* (4 - missing_padding)
+    return base64.b64decode(data, altchars)
+
 
 class DrayerWebServer(object):
 	@cherrypy.expose
 	def index(self):
 		return "Hello World!"
-        
+
+	@cherrypy.expose
+	def crdr(self, streampk, old):
+		"""Asks the node for the block that points to old in the modified chain.
+			We might need to patch the chain but not be able to by ourselves
+			because we don't have the PK
+		
+		"""
+		streampk=decode_base64(streampk)
+		if not len(streampk)==32:
+			raise ValueError("PK must be 32 bytes")
+
+		cherrypy.response.headers['Content-Type']="application/octet-stream"
+		old=int(old)
+		i = _allStreams[streampk].getChainRepair(old, streampk)
+		x=({
+			"hash":i["hash"],
+			"key":i["key"],
+			"val":i["value"],
+			"id": i["id"],
+			"sig":i["signature"],
+			"prev":i["prev"],
+			"prevch":i["prevchange"],
+			"mod":i["modified"],
+			"chain":streampk
+		})
+	
+		x= msgpack.packb(x)
+		return(x)
+			
+       
 	@cherrypy.expose
 	def newRecords(self, streampk, t):
 		"Returns a msgpacked list of new records"
+		streampk=decode_base64(streampk)
+		if not len(streampk)==32:
+			raise ValueError("PK must be 32 bytes")
+
 		cherrypy.response.headers['Content-Type']="application/octet-stream"
 		t = int(t)
-		c = _allStreams[b64decode(streampk)].getRecordsSince(t)
+		c = _allStreams[streampk].getRecordsSince(t,streampk)
 		limit = 100
 		l = []
 		for i in c:
 			if limit<1:
 				break
+				limit-=1
 			l.append({
 				"hash":i["hash"],
 				"key":i["key"],
@@ -52,7 +103,7 @@ class DrayerWebServer(object):
 				"prev":i["prev"],
 				"prevch":i["prevchange"],
 				"mod":i["modified"],
-				"chain":i["chain"]
+				"chain": streampk
 			})
 	
 		x= msgpack.packb(l)
@@ -77,12 +128,16 @@ class DrayerStream():
 				pubkey=b64decode(pubkey)
 		
 		self.pubkey = None
+		self.privkey = None
 		self.fn = fn
 		
 		self.noServe = noServe
 		
 		self.lastSynced = 0
-		self.lastDHTAnnounce =0 
+		self.lastDHTAnnounce =0
+
+		#Enable pushing TO the dht 
+		self.enable_dht = False
 		
 		#Keep track of which of the primary servers we sync with,
 		#if there are any
@@ -150,7 +205,9 @@ class DrayerStream():
 			self.tloc.conn.row_factory = sqlite3.Row
 			return self.tloc.conn
 
-	
+	def onChange(self,action,id,key, chain):
+		pass
+
 	def getBytesForSignature(self, id,key,h, modified, prev,prevchanged):
 		#This is currently the definition of how to make a signature
 		return struct.pack("<QqqqL", id,modified,prev, prevchanged,len(key))+key.encode("utf8")+h
@@ -242,19 +299,20 @@ class DrayerStream():
 			pass
 		else:
 			url+="/"
-			
+		
+		if chain:
+			if not len(chain)==20:
+				raise RuntimeError("Invalid key")
 		#newRecords/PUBKEY/sinceTime
 		r = requests.get(
 				url+
 				"newRecords/"+
 				urllib.parse.quote_plus(b64encode(chain or self.pubkey).decode("utf8"))+
-				"/"+str(self.getModifiedTip()
-			),stream=True)
+				"/"+str(self.getModifiedTip(chain)),stream=True)
 		r.raise_for_status()
 		r=r.raw.read(100*1000*1000)
 		
 		r = msgpack.unpackb(r)
-		
 		#Haven't needed to read siblings yet
 		siblings = None
 		
@@ -270,7 +328,7 @@ class DrayerStream():
 				c = i[b'chain']
 				if c==self.pubkey:
 					c=b''
-				self.insertRecord(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],c)
+				self.insertRecord(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],c,url)
 			except:
 				print(traceback.format_exc())
 				return inserted
@@ -321,8 +379,13 @@ class DrayerStream():
 		#Note that we read from all siblings. The sibling of our sibling is also our sibling.
 		c.execute('SELECT id FROM record WHERE key="__drayer_siblings__"')
 		#We're always included in our own
-		periods = {self.pubkey:{0,0,0}}
-		
+		periods = {}
+		periods[self.pubkey]={
+			b"from": 0,
+			b"to":0,
+			b"timestamp":0,
+			b'pubkey': b''
+		}
 		#This is a really slow process of reading things. We probably need to cache this somehow.
 		for i in c:
 			self.validateRecord(i["id"], i["chain"])
@@ -334,7 +397,7 @@ class DrayerStream():
 							periods[j[b"pubkey"]] = j
 				else:
 					periods[i[b"pubkey"]] = j
-			torm=[]
+		torm=[]
 		
 		#After we have everything, delete the 
 		#Records that have been deleted by COMPLETEs.
@@ -369,14 +432,96 @@ class DrayerStream():
 		if self.hasRecordBeenDeleted(id,chain):
 			raise RuntimeError("Record appears valid but was deleted by a later change")
 
+
 		
+	def _requestChainRepair(self,url, pdest, oldrecord,chain):
+		"""We use this when we get something we cannot handle
+			without breaking the modified chain
+		"""
+		r = requests.get(
+			url+
+			"crdr/"+
+			urllib.parse.quote_plus(b64encode(chain or self.pubkey).decode("utf8"))+
+			"/"+str(pdest)
+			,stream=True)
+		r.raise_for_status()
+		r=r.raw.read(100*1000*1000)
 		
+		r = msgpack.unpackb(r)
 		
-	def insertRecord(self, id,key,value, modified, prev,prevchanged, signature, chain=b""):
-		print("inserting",key, id, prev,modified,prevchanged)
+
 		
+		if chain==self.pubkey:
+			chain=b''
+		h = libnacl.crypto_generichash(r[b'val'])
+		if not h==r[b'hash']:
+			raise RuntimeError("Not even trying to pretend it's valid")
+
+		self.checkSignature(r[b'id'],r[b'key'].decode("utf8"),r[b'hash'], r[b'mod'], r[b'prev'], r[b'prevch'],r[b'sig'],chain)
+
+		if not r[b'prevch']< oldrecord["prevchange"]:
+			#We are doing something dangerous, accepting a record
+			#With a modified time before the tip. Luckily, when this happens,
+			#The back pointer can only move backwards.
+			#We can't insert new records into the gap in the modified
+			#times. So we always can tell if a version of an old message
+			#is good.
+
+			#Interestingly, we might get a record that does not point
+			#To the one we asked for. The thing we asked about
+			#Might also have been deleted!
+
+			#But nothing will have been inserted in the past
+
+			raise RuntimeError("Impossible pointer value")
+
+		beingReplaced = self.getRecordById(r[b'id'], chain)
+
+		#It is possible, but unlikely that so much has been deleted
+		#That a completely new  record points all the way back there.
+		#However, in that case it would not be changing history I don't think
+		#So this functions should't ever have to handle that.
+		#And we raise an exception
+
+		if beingReplaced:
+
+			if not r[b'prevch']<= beingReplaced['prevchange']:
+				raise RuntimeError("Sanity check fail")
+
+			if not r[b'prevch']== beingReplaced['prevchange']:
+				#Especially in the case of the back entry,
+				#We may replace something with one that points to the same
+				#Place. The new entry must be newer in this case.
+
+				if not r[b'mod']>beingReplaced['modifed']:
+					raise RuntimeError("Refusing to replace with older block")
+
+
+			#Only accept records if they actually fix our chain problem
+			if not r[b'prevch']<= pdest:
+				raise RuntimeError("New record would not repair chain")
+
+			newp = r[b'prev']
+			oldp=beingReplaced[b'prev']
+
+		else:
+			raise RuntimeError("Does not replace existing record")
+
+		
+		#Quickly garbage collect any values that this change obsoletes
+		if not newp==oldp:
+			self.getConn().execute("DELETE FROM record WHERE id<=? AND id>? AND chain=?",(oldp,newp,chain))
+
+		self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(r[b'id'],chain))
+		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(r[b'id'],r[b'key'],r[b'val'],r[b'hash'],r[b'mod'],r[b'prev'],r[b'prevch'], r[b'sig'],chain))
+
+
+
+		
+	def insertRecord(self, id,key,value, modified, prev,prevchanged, signature, chain=b"", requestURL=None):		
 		#TODO: Removing peers is super confusing. We'll refuse to add any more to their chains.
 		#But if there's already messages will there be race conditions?
+		#RequestURL is the URL that we 
 		if not self.isSiblingAtTime(chain, modified):
 				raise RuntimeError("Chain must be local chain or a sibling")
 		
@@ -426,18 +571,43 @@ class DrayerStream():
 			#See the readme for why we can get away with this. It's because past state of the modified
 			#chain doesn't matter, only the last block. Anyone getting new data gets the new,
 			#anyone else doesn't care
-			if oldRecord:				
+			didModify = False
+			if oldRecord:		
+				didModify=True		
 				n = self.getNextModifiedRecord(oldRecord["modified"],chain)
 				if n:
-					p = oldRecord["prevchange"]
-					#Whatever is in front of us needs to point to what's behind us.
-					sig=self.makeSignature(n["id"],n["key"],n["hash"],n["modified"],n["prev"],n["prevchange"],chain)
-					self.getConn().execute("UPDATE record SET prevchange=?,signature=? WHERE id=? AND chain=?",(p, sig,n["id"], chain))
+					#This is what we think the record before the old record is.
+					#Since the record we are replacing won't be there, we need to find
+					#What really points at that record(Or the one before it, etc, if it's gone)
+					p = oldRecord["prevchange"]	
+
+
+
+					#We have the private key, why not do the patch ourselves?
+					if self.privkey:
+						#Whatever is in front of us needs to point to what's behind us.	
+						sig=self.makeSignature(n["id"],n["key"],n["hash"],n["modified"],n["prev"],p,chain)	
+						self.getConn().execute("UPDATE record SET prevchange=?,signature=? WHERE id=? AND chain=?",(p, sig,n["id"], chain))	
+					elif requestURL:
+						#We do not have the private key, we need to request more data
+						#to repair the chain so that this new record doesn't break things.
+						
+						#The oldrecord parameter we pass is thenext record, because the next
+						#record is the one we need to replace to mess with this record.
+						self._requestChainRepair(requestURL, p, n, chain)
+					else:
+						raise RuntimeError("That record would break the chain. To insert it you must supply a URL that can provide repair data.")
+				
 				self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
 			
 			
 			self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(id,key,value,h,modified,prev,prevchanged, signature,chain))
 			
+			if didModify:
+				self.onChange("modify", id, key, chain)
+			else:
+				self.onChange("add", id, key, chain)
+
 			
 			#Now, in a completely different chain, we se if anything has been "patched out" of it.
 			if oldPrev:
@@ -467,7 +637,7 @@ class DrayerStream():
 			
 			#We cannot have a record that connects to itself...
 			if mtip == n["modified"]:
-				mtip =n['prevchange']
+				raise RuntimeError("What?")
 			
 			#Can't connect to the one we're about to delete either
 			if mtip== torm['modified']:
@@ -501,8 +671,13 @@ class DrayerStream():
 			
 		mtime = int(time.time()*1000*1000)
 		prevMtime = self.getModifiedTip()
+		if self.getRecordById(id):
+			if self.getRecordById(id)['modified']==prevMtime:
+				raise RuntimeError("Cannot modify the same record twice in a row")
+
 		h = libnacl.crypto_generichash(v)
 		sig = self.makeSignature(id,k,h,mtime,prev,prevMtime)
+		print(k, v, mtime, prevMtime,id)
 		self.insertRecord(id,k,v,mtime,prev,prevMtime,sig)
 		self.broadcastUpdate()
 		
@@ -571,9 +746,7 @@ class DrayerStream():
 			
 	def broadcastUpdate(self, addr= (MCAST_GRP,MCAST_PORT),chain=b""):
 		
-		"Anounce what the tip of the modified chain is, to everyone"
-		print("bcaststart")
-		
+		"Anounce what the tip of the modified chain is, to everyone"		
 		if not localDiscovery:
 			return
 			
@@ -613,7 +786,7 @@ class DrayerStream():
 		
 		#Delete the record for real, so it doesn't trouble us anymore
 		self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
-		print("Garbage collected")
+		self.onChange("delete", id, key, chain)
 		return True
 		
 	
@@ -641,8 +814,28 @@ class DrayerStream():
 			return x
 		return 0	
 
+
+
+
+	def getChainRepair(self,t,chain=b''):
+		"""Get the thing that points at t, but if t is gone, get whatever points at the existing block that comes before t
+			The actual logic is to find the earliest thing that points at t or before 
+		
+		"""
+		if chain==self.pubkey:
+			chain=b''
+		c=self.getConn().cursor()
+		c.execute("SELECT * FROM record WHERE prevchange<=? AND chain=? ORDER BY prevchange ASC",(t,chain))
+		x= c.fetchone()
+		if x:
+			print(t, x["id"], x["prevchange"])
+			return x
+		return None
+
 	def getNextModifiedRecord(self,t,chain=b''):
 		"Returns the next block in the modified chain"
+		if chain==self.pubkey:
+			chain=b''
 		c=self.getConn().cursor()
 		c.execute("SELECT * FROM record WHERE prevchange=? AND chain=?",(t,chain))
 		x= c.fetchone()
@@ -682,17 +875,19 @@ class DrayerStream():
 			return x[0]
 		return 0
 		
-	def getRecordsSince(self,t):
+	def getRecordsSince(self,t,chain=b''):
 		"Gets the cursor that can iterate over a certain number of records. Returns records for all chains"
+		if chain ==self.pubkey:
+			chain = b''
 		c=self.getConn().cursor()
-		c.execute("SELECT * FROM record WHERE modified>? ORDER BY id ASC",(t,))
+		c.execute("SELECT * FROM record WHERE modified>? AND chain=? ORDER BY modified ASC",(t,chain))
 		return c
 
 
 	def getModifiedTip(self,chain=b""):
 		"Get the most recently modified records's modified time"
 		c=self.getConn().cursor()
-		c.execute("SELECT modified FROM record WHERE chain=? ORDER BY id DESC",(chain,))
+		c.execute("SELECT modified FROM record WHERE chain=? ORDER BY modified DESC",(chain,))
 		x=c.fetchone()
 		if x:
 			return x[0]
@@ -701,7 +896,7 @@ class DrayerStream():
 	def getModifiedTipRecord(self,chain=b""):
 		"Get the most recently modified records's modified time"
 		c=self.getConn().cursor()
-		c.execute("SELECT * FROM record WHERE chain=? ORDER BY id DESC",(chain,))
+		c.execute("SELECT * FROM record WHERE chain=? ORDER BY modified DESC",(chain,))
 		x=c.fetchone()
 		if x:
 			return x
@@ -831,8 +1026,6 @@ def drayerServise():
 						
 					if d[b"chain"] in _allStreams:
 						try:
-
-								
 							x= _allStreams[d[b"chain"]]
 							
 							#Internally we use empty strings to mean the local chain	
@@ -890,4 +1083,4 @@ def startServer():
 			if i==39:
 				raise
 			#Trying random ports till we find a good one
-			http_port = random(8000, 48000)
+			http_port = random.randint(8000, 48000)

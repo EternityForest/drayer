@@ -136,12 +136,35 @@ give you block 3, which points at one. To make this work, we allow new blocks to
 In this way we can edit things without changing the modified time, because we don't actually need to propagate that change.
 Everything just goes on as usual even if the chain is broken, so long as the front part of the chain is valid.
 
+### Chain repair data request
+
+Of course, now we have a new problem. In this scenario node A is at block four, B is at block three, and C is at block five.
+
+Node B will sync correctly, ignoring the corruption to its old modified chain.
+
+Node C however can no longer sync with B, because it doesn't have blocks and so can't ignore the modified chain like B could.
+
+Normally, B could just patch it's own chain, fixing things when it notices that
+it would be broken.
+
+However, we use digital signatures, and only A can create them.
+
+So, we do another hack. When we someone gives us a block that would change an existing block(Thus removing it from it's spot in the modified chain), we must ask the node
+that sent it to us for the replacement block just in front.
+
+It is not possible for them to know without us asking, because they have already deleted
+the informating that would tell them the chain has ever been touched.
+
+We then use this new block to perform the "silient update", and carry on.
+
+This should ensure that every block either points to a previous entry in the mod chain,
+or to zero, and we only care that each mirror's modified chain is consistent with itself.
+
 ### Replay attacks
 
-We do not want those on our chains. So we disallow inserting records that have a modified date before the tip of the modified chain.
+We do not want those on our chains. So we do a bit of validation on these silent updates.  See code for details, If the new block points at the same thing as the old, it 
+the new block must be newer. Otherwise the pointer must point to something before the old pointer.
 
-The exception is for partial mirrors, if they "connect" to the very back of the modified chain. In this special case we treat the
-back as another chain going backwards.
 
 
 
