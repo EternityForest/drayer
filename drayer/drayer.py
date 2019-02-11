@@ -585,7 +585,8 @@ class DrayerStream():
 					if modified<=self.getRecordById(prev,chain)['modified']:
 						raise RuntimeError("Cannot replace newer with older")
 					self.getConn().execute("DELETE FROM record WHERE id>? AND id<?",(prev,id))
-
+					#TODO: Put in the real changes
+					self.onChange("unknown",0,"",b"")
 
 				elif self.getFirstRecordAfter(id,chain):
 					if self.getFirstRecordAfter(id,chain)['prev']<id:
@@ -701,7 +702,8 @@ class DrayerStream():
 			#There may be 2 different records we must patch
 			if needsPatching2:
 				self.fixPrevChangePointer(needsPatching)
-		
+		self.broadcastUpdate()
+	
 			
 	def fixPrevChangePointer(self,n,chain=b''):
 		c = self.getConn().cursor()
