@@ -167,7 +167,14 @@ the new block must be newer. Otherwise the pointer must point to something befor
 
 
 
+## Order Mismatching, and solution
 
+We can see that we have another problem now. The ID and the modified chains can be in
+a totally different order! When we transmit blocks, we send in modified order, so recievers can get blocks that don't fit in the ID chain!!
+
+We solve this by allowing gaps in the ID chain. Our new GC criteria is that a block gets deleted if the next block after it points to something before it.
+
+Eventually, the modified chain ensures that we get all blocks, letting us know what's been deleted. We can't miss a block.
 
 ## Record Structure:
      

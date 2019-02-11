@@ -493,7 +493,7 @@ class DrayerStream():
 				#We may replace something with one that points to the same
 				#Place. The new entry must be newer in this case.
 
-				if not r[b'mod']>beingReplaced['modifed']:
+				if not r[b'mod']>beingReplaced['modified']:
 					raise RuntimeError("Refusing to replace with older block")
 
 
@@ -502,7 +502,7 @@ class DrayerStream():
 				raise RuntimeError("New record would not repair chain")
 
 			newp = r[b'prev']
-			oldp=beingReplaced[b'prev']
+			oldp=beingReplaced['prev']
 
 		else:
 			raise RuntimeError("Does not replace existing record")
@@ -519,84 +519,102 @@ class DrayerStream():
 
 		
 	def insertRecord(self, id,key,value, modified, prev,prevchanged, signature, chain=b"", requestURL=None):		
-		#TODO: Removing peers is super confusing. We'll refuse to add any more to their chains.
-		#But if there's already messages will there be race conditions?
-		#RequestURL is the URL that we 
-		if not self.isSiblingAtTime(chain, modified):
-				raise RuntimeError("Chain must be local chain or a sibling")
-		
-		if chain==self.pubkey:
-			chain=b''
-			
-		#Most basic test, make sure it's signed correctly
-		
-		#We don't supply a hash because we check it here anyway
-		h= libnacl.crypto_generichash(value)
-		self.checkSignature(id,key, h,modified, prev,prevchanged, signature,chain)
-	
-		#The thing that the old block that we might be replacing used to point at
-		oldPrev = self.getPrev(id,chain)
-		
-
-		mtip = self.getModifiedTip(chain)
-		
-		#TODO:Back of chain connections
-		if modified<= mtip:
-			raise RuntimeError("Modified time cannot be before the tip of the chain")
-			
-		if not self.getRecordByModificationTime(prevchanged,chain):
-			#The new block has to connect SOMEWHERE on the chain but not necessearily 
-			#the end, so it can "patch stuff out".
-		
-			#Always allow the special case of the thing that's supposed to point at the very start,
-			#Imaginary block 0.
-			if prevchanged:
-				#And of course we have the exception for linking to the back
-				raise ValueError("New records must connect to an existing value in the mchain, or must connect to the back of the chain.")
-		
-		tip = self.getChainTip(chain)
-		
-		if not prev ==tip:
-			if not self.getRecordById(id,chain):
-				#Also, we can append to the back
-				if not self.getChainBackPointer(chain)==id:
-					raise ValueError("New records must modify an existing entry, or append to one of the ends")
-			
-				
 		with self.getConn():
-			oldRecord = self.getRecordById(id, chain)
-			#If we are overwriting a record that had something pointing to it,
-			#We're going to silently patch what it pointed to, and we aren't going to tell anyone unless they ask.
+			#TODO: Removing peers is super confusing. We'll refuse to add any more to their chains.
+			#But if there's already messages will there be race conditions?
+			#RequestURL is the URL that we 
+			print(modified,prevchanged)
+
+			if not self.isSiblingAtTime(chain, modified):
+					raise RuntimeError("Chain must be local chain or a sibling")
 			
-			#See the readme for why we can get away with this. It's because past state of the modified
-			#chain doesn't matter, only the last block. Anyone getting new data gets the new,
-			#anyone else doesn't care
-			didModify = False
-			if oldRecord:		
-				didModify=True		
-				n = self.getNextModifiedRecord(oldRecord["modified"],chain)
-				if n:
-					#This is what we think the record before the old record is.
-					#Since the record we are replacing won't be there, we need to find
-					#What really points at that record(Or the one before it, etc, if it's gone)
-					p = oldRecord["prevchange"]	
+			if chain==self.pubkey:
+				chain=b''
+				
+			#Most basic test, make sure it's signed correctly
+			
+			#We don't supply a hash because we check it here anyway
+			h= libnacl.crypto_generichash(value)
+			self.checkSignature(id,key, h,modified, prev,prevchanged, signature,chain)
+		
+			#The thing that the old block that we might be replacing used to point at
+			oldPrev = self.getPrev(id,chain)
+			
+
+			mtip = self.getModifiedTip(chain)
+			
+			#TODO:Back of chain connections
+			if modified<= mtip:
+				raise RuntimeError("Modified time cannot be before the tip of the chain")
+				
+			if not self.getRecordByModificationTime(prevchanged,chain):
+				#The new block has to connect SOMEWHERE on the chain but not necessearily 
+				#the end, so it can "patch stuff out".
+
+				#Connecting doesn't mean it 
+
+				#Always allow the special case of the thing that's supposed to point at the very start,
+				#Imaginary block 0.
+				if prevchanged:
+					#And of course we have the exception for linking to the back
+					raise ValueError("New records must connect to an existing value in the mchain, or must connect to the back of the chain.")
+			
+
+			
+			tip = self.getChainTip(chain)
+			print(tip,prev)
+			if not prev ==tip:
+				#If the record connects to an existing link in the chain,
+				#it's basically forking it, and we should garbage collect everything
+				#In between the new record and where it connects
+				if self.getRecordById(prev,chain):
+					if modified<=self.getRecordById(prev,chain)['modified']:
+						raise RuntimeError("Cannot replace newer with older")
+					self.getConn().execute("DELETE FROM record WHERE id>? AND id<?",(prev,id))
 
 
+				elif self.getFirstRecordAfter(id,chain):
+					if self.getFirstRecordAfter(id,chain)['prev']<id:
+						raise ValueError("This record was already deleted")
+				
+				else:
+					if modified<=self.getRecordById(id,chain)['modified']:
+						raise RuntimeError("Cannot replace newer with older")
 
-					#We have the private key, why not do the patch ourselves?
-					if self.privkey:
-						#Whatever is in front of us needs to point to what's behind us.	
-						sig=self.makeSignature(n["id"],n["key"],n["hash"],n["modified"],n["prev"],p,chain)	
-						self.getConn().execute("UPDATE record SET prevchange=?,signature=? WHERE id=? AND chain=?",(p, sig,n["id"], chain))	
-					elif requestURL:
-						#We do not have the private key, we need to request more data
-						#to repair the chain so that this new record doesn't break things.
-						
-						#The oldrecord parameter we pass is thenext record, because the next
-						#record is the one we need to replace to mess with this record.
-						self._requestChainRepair(requestURL, p, n, chain)
-					else:
-						raise RuntimeError("That record would break the chain. To insert it you must supply a URL that can provide repair data.")
+			oldRecord = self.getRecordById(id, chain)
+
+			#If we are overwriting a record that had something pointing to it,
+			#We're going to silently patch what it pointed to, and we aren't going to tell anyone unless they ask.##Also, we can append to the back
+			
+			#But we don't need to do that for the very first record
+			if not self.getChainBackPointer(chain)==id:
+				#See the readme for why we can get away with this. It's because past state of the modified
+				#chain doesn't matter, only the last block. Anyone getting new data gets the new,
+				#anyone else doesn't care
+				didModify = False
+				if oldRecord:		
+					didModify=True		
+					n = self.getNextModifiedRecord(oldRecord["modified"],chain)
+					if n:
+						#This is what we think the record before the old record is.
+						#Since the record we are replacing won't be there, we need to find
+						#What really points at that record(Or the one before it, etc, if it's gone)
+						p = oldRecord["prevchange"]	
+
+						#We have the private key, why not do the patch ourselves?
+						if self.privkey:
+							#Whatever is in front of us needs to point to what's behind us.	
+							sig=self.makeSignature(n["id"],n["key"],n["hash"],n["modified"],n["prev"],p,chain)	
+							self.getConn().execute("UPDATE record SET prevchange=?,signature=? WHERE id=? AND chain=?",(p, sig,n["id"], chain))	
+						elif requestURL:
+							#We do not have the private key, we need to request more data
+							#to repair the chain so that this new record doesn't break things.
+							
+							#The oldrecord parameter we pass is thenext record, because the next
+							#record is the one we need to replace to mess with this record.
+							self._requestChainRepair(requestURL, p, n, chain)
+						else:
+							raise RuntimeError("That record would break the chain. To insert it you must supply a URL that can provide repair data.")
 				
 				self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
 			
@@ -635,10 +653,12 @@ class DrayerStream():
 			
 			torm = self.getRecordById(id)
 			
-			#We cannot have a record that connects to itself...
-			if mtip == n["modified"]:
-				raise RuntimeError("What?")
-			
+			#If the record in front of the one we're about to
+			#Modify needs to be patched to point at the one behind
+			#the one we're deleting, to keep the mchain in order
+			needsPatching = self.getNextModifiedRecord(torm["modified"])
+
+
 			#Can't connect to the one we're about to delete either
 			if mtip== torm['modified']:
 				x = self.getRecordByModificationTime(torm["prevchange"])
@@ -654,10 +674,27 @@ class DrayerStream():
 			t = int(time.time()*1000000)
 			sig=self.makeSignature(n["id"],n["key"], n["hash"],t,p,mtip)
 			self.insertRecord(n["id"],n["key"],n["value"], t,p, mtip,sig)
-			
+			if needsPatching:
+				self.fixPrevChangePointer(needsPatching)
 		
 			
-					
+	def fixPrevChangePointer(self,n,chain=b''):
+		c = self.getConn().cursor()
+		#If the chain is otherwise consistent, the most recent record before this one is the one
+		#We should be pointing at
+		c.execute("SELECT modified FROM record WHERE modified<? ORDER BY modified DESC",(n["modified"],))
+		
+		#If there isn't a record before us, we're the first and we 
+		#point at zero
+		x = c.fetchone()
+		if not x:
+			x = None
+		else:
+			x = x[0]
+
+		sig=self.makeSignature(n["id"],n["key"],n["hash"],n["modified"],n["prev"],x,chain)	
+		self.getConn().execute("UPDATE record SET prevchange=?,signature=? WHERE id=? AND chain=?",(x, sig,n["id"], chain))	
+
 	def __setitem__(self,k, v):
 		k,v=self.filterInsert(k,v)
 		
@@ -783,7 +820,14 @@ class DrayerStream():
 		#Something still refers to it
 		if self.hasReferrent(id,chain):
 			return False
-		
+
+		x =self.getRecordById(id,chain)
+
+		#It doesn't exist, so apperantly yes!
+		if not x:
+			return True
+
+		key = x['key']
 		#Delete the record for real, so it doesn't trouble us anymore
 		self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
 		self.onChange("delete", id, key, chain)
@@ -851,12 +895,35 @@ class DrayerStream():
 		if x:
 			return x
 		return 0	
+
+	def canConnectToModifiedChain(self,t,chain=b''):
+		"Returns true if t is within the min and max values of the mod chain"
+		c=self.getConn().cursor()
+		tip = self.getModifiedTip(chain)
+		if t>tip:
+			return False
 		
+		#0 is the universal connector, if we connect to 0 we know
+		#there's nothing before
+		if t==0:
+			return True 
+		#We don't accept things that are just floating in space before the chain start
+		c.execute("SELECT * FROM record WHERE modified<=t AND chain=?",(t,chain))
+		x= c.fetchone()
+		if x:
+			return True
+		return 0	
+				
 	def getRecordById(self,id,chain=b''):
 		c=self.getConn().cursor()
 		c.execute("SELECT * FROM record WHERE id=? AND chain=?",(id,chain))
 		return c.fetchone()
-			
+
+	def getFirstRecordAfter(self,id,chain=b''):
+		c=self.getConn().cursor()
+		c.execute("SELECT * FROM record WHERE id>? AND chain=? ORDER BY id ASC",(id,chain))
+		return c.fetchone()			
+
 	def getChainTip(self,chain=b''):
 		"Gets the record at the tip of the record chain"
 		c=self.getConn().cursor()

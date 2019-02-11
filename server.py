@@ -14,11 +14,12 @@ if __name__ == '__main__':
 	d["foo"] = b"testing8"
 	d["foo7"]=b"testing7"
 	d["foo6"]=b"testing7"
+	d["test"]=b"blah"
 	
 	#d["__drayer_siblings"] = msgp{
 	#del d["foo7"]
 
-	print(d["foo"])
+	#print(d["foo"])
 
 	while 1:
 		pass
