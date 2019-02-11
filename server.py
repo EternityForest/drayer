@@ -5,7 +5,7 @@ if __name__ == '__main__':
 	#drayer.startBittorent()
 	drayer.startLocalDiscovery()
 	#mappings = drayer.openRouterPort()
-	d = drayer.DrayerStream("fooo.stream","H3E55+t/tItsDp/TB053Jr9ppL2WPycRIdp5Gndrzfs=")
+	d = drayer.DrayerStream("fooo.stream","ce19HK2F/lWCrMny22086NFW9nssJIuyYC1SAqab7dc=")
 
 	#time.sleep(15)
 	#d.announceDHT()

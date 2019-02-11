@@ -168,6 +168,7 @@ class DrayerStream():
 			 
 			c.execute("CREATE TABLE IF NOT EXISTS record (id integer primary key, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob, chain blob);")
 
+			self.pubkey=pubkey
 			pk = self.getAttr("PublicKey")
 			if pk:
 				pk = b64decode(pk)
@@ -177,13 +178,16 @@ class DrayerStream():
 			if pk:
 				self.pubkey = pk
 			else:
-				if not pubkey:
+				if not self.pubkey:
 					#No pubkey in the file or in the input, assume they want to make a new
 					vk, sk = libnacl.crypto_sign_keypair()
 					self.setAttr("PublicKey", b64encode(vk).decode("utf8"))
 					self.pubkey = vk
 					self.privkey = sk
-					self.savePK()
+					if not os.path.exists(fn+".privatekey"):
+						self.savePK()
+					else:
+						raise RuntimeError("Refusing to overwrite PK")
 				else:
 					#Get the pubkey from user
 					self.setAttr("PublicKey", b64encode(pubkey).decode("utf8"))
@@ -193,7 +197,12 @@ class DrayerStream():
 			if os.path.exists(fn+".privatekey"):
 				with open(fn+".privatekey") as f:
 					self.privkey = b64decode(f.read())
-					
+
+			if self.privkey:
+				#Make sure privkey is good so we don't wate our time
+				x = libnacl.crypto_sign_detached(b"test", self.privkey)
+				libnacl.crypto_sign_verify_detached(x,b'test', self.pubkey)
+
 			if noServe==False:
 				_allStreams[self.pubkey] = self
 	
@@ -313,6 +322,7 @@ class DrayerStream():
 		r=r.raw.read(100*1000*1000)
 		
 		r = msgpack.unpackb(r)
+		print(self.getModifiedTip(chain),r)
 		#Haven't needed to read siblings yet
 		siblings = None
 		
@@ -326,6 +336,10 @@ class DrayerStream():
 			try:
 				#Internal compressed representation
 				c = i[b'chain']
+
+				if c and not len(c)==32:
+					raise ValueError("Invalid len")
+
 				if c==self.pubkey:
 					c=b''
 				self.insertRecord(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],c,url)
@@ -604,8 +618,10 @@ class DrayerStream():
 						#We have the private key, why not do the patch ourselves?
 						if self.privkey:
 							#Whatever is in front of us needs to point to what's behind us.	
-							sig=self.makeSignature(n["id"],n["key"],n["hash"],n["modified"],n["prev"],p,chain)	
-							self.getConn().execute("UPDATE record SET prevchange=?,signature=? WHERE id=? AND chain=?",(p, sig,n["id"], chain))	
+							sig=self.makeSignature(n["id"],n["key"], n["hash"],n["modified"],n["prev"],p,chain)
+							self.getConn().execute("DELETE FROM record WHERE (id=? AND chain=?)",(n["id"], chain))
+							self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(n["id"],n["key"],n["value"],n['hash'],n["modified"],n["prev"], p,sig,chain))
+
 						elif requestURL:
 							#We do not have the private key, we need to request more data
 							#to repair the chain so that this new record doesn't break things.
@@ -656,7 +672,12 @@ class DrayerStream():
 			#If the record in front of the one we're about to
 			#Modify needs to be patched to point at the one behind
 			#the one we're deleting, to keep the mchain in order
-			needsPatching = self.getNextModifiedRecord(torm["modified"])
+			needsPatching = self.getNextModifiedRecord(n["modified"])
+
+
+			#If the record in front of the one we're about to
+			#delete may also need patching
+			needsPatching2 = self.getNextModifiedRecord(torm["modified"])
 
 
 			#Can't connect to the one we're about to delete either
@@ -676,6 +697,10 @@ class DrayerStream():
 			self.insertRecord(n["id"],n["key"],n["value"], t,p, mtip,sig)
 			if needsPatching:
 				self.fixPrevChangePointer(needsPatching)
+
+			#There may be 2 different records we must patch
+			if needsPatching2:
+				self.fixPrevChangePointer(needsPatching)
 		
 			
 	def fixPrevChangePointer(self,n,chain=b''):
@@ -692,9 +717,13 @@ class DrayerStream():
 		else:
 			x = x[0]
 
-		sig=self.makeSignature(n["id"],n["key"],n["hash"],n["modified"],n["prev"],x,chain)	
-		self.getConn().execute("UPDATE record SET prevchange=?,signature=? WHERE id=? AND chain=?",(x, sig,n["id"], chain))	
+		if chain==self.pubkey:
+			chain=b''
+		sig=self.makeSignature(n["id"],n["key"], n["hash"],n["modified"],n["prev"],x,chain)
+		self.getConn().execute("DELETE FROM record WHERE (id=? AND chain=?)",(n["id"], chain))	
+		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(n["id"],n["key"],n["value"],n['hash'],n["modified"],n["prev"], x,sig,chain))
 
+		self.validateRecord(n['id'])
 	def __setitem__(self,k, v):
 		k,v=self.filterInsert(k,v)
 		
@@ -714,7 +743,6 @@ class DrayerStream():
 
 		h = libnacl.crypto_generichash(v)
 		sig = self.makeSignature(id,k,h,mtime,prev,prevMtime)
-		print(k, v, mtime, prevMtime,id)
 		self.insertRecord(id,k,v,mtime,prev,prevMtime,sig)
 		self.broadcastUpdate()
 		
@@ -817,15 +845,21 @@ class DrayerStream():
 		if id==t:
 			return False
 	
-		#Something still refers to it
-		if self.hasReferrent(id,chain):
-			return False
 
 		x =self.getRecordById(id,chain)
-
 		#It doesn't exist, so apperantly yes!
 		if not x:
 			return True
+
+		if self.getFirstRecordAfter(id,chain):
+			if self.getFirstRecordAfter(id,chain)['prev']<id:
+				#This condition means it HAS been deleted
+				pass
+			else:
+				return False
+		else:
+			return False
+		
 
 		key = x['key']
 		#Delete the record for real, so it doesn't trouble us anymore
@@ -1090,9 +1124,11 @@ def drayerServise():
 					#So we block anything that isn't local.
 					if not isLocal(addr[0]):
 						continue
+					print(addr,d[b"chain"])
 						
 					if d[b"chain"] in _allStreams:
 						try:
+							print(d[b'chain'])
 							x= _allStreams[d[b"chain"]]
 							
 							#Internally we use empty strings to mean the local chain	
@@ -1100,7 +1136,7 @@ def drayerServise():
 								chain = b''
 							else:
 								chain = d[b"chain"]
-								
+							print(chain)
 							if d[b"mod"]> x.getModifiedTip():
 								x.httpSync("http://"+addr[0]+":"+str(d[b"httpport"]),chain)
 						finally:

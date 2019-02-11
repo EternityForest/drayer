@@ -70,6 +70,7 @@ drayer.startLocalDiscovery()
 def openStream(x):
 	global db
 	db = DrayerRefresher(x)
+	rlfun()
 
 
 
@@ -113,24 +114,26 @@ def FilePopup(x):
 	fch = FileChooserIconView()
 	fch.path= os.getcwd()
 
-	pubkey = TextInput(hint_text="Public Key, leave blank to create new stream or accept the one in the file", multiline=False)
-	filename = TextInput(hint_text="Filename", multiline=False)
+	pubkey = TextInput(hint_text="Public Key of the stream, leave blank to create new stream or accept the one in the file", multiline=False,size_hint=(1,0.1))
+	filename = TextInput(hint_text="Filename", multiline=False,size_hint=(1,0.1))
 
-	button = Button(text='Post!', font_size=14, size_hint=(1,0.2))
+	button = Button(text='Select', font_size=14, size_hint=(1,0.1))
 
 	def s(x):
 		filename.text = os.path.basename(str(fch.selection))
 	n = []
 
 	def f():
-
 		openStream(os.path.join(fch.path,filename.txt) ,pubkey.text)
 		n.extend(fch.selection)
-		
+
+	layout.add_widget(pubkey)
 	layout.add_widget(fch)
+	layout.add_widget(filename)
+
 	layout.add_widget(button)
 	
-	popup = Popup(title='Test popup', content=layout, size_hint=(None, None), size=(600, 400))
+	popup = Popup(title='Open or Create a Stream', content=layout, size_hint=(None, None), size=(600, 400))
 
 	button.bind(on_press=popup.dismiss)
 	popup.open()
@@ -160,12 +163,9 @@ def ConfirmPopup(x, cb):
 	popup.open()
 
 
-
-
-
 def getPublicSocialposts():
 	c = db.getConn().cursor()
-	c.execute('SELECT key,value FROM record WHERE key LIKE "PublicSocialPost%" ORDER BY modified desc')
+	c.execute('SELECT key,value FROM record WHERE key LIKE "PublicSocialPost%" ORDER BY id desc')
 	return c
 
 def getOneSocialPost(key):
@@ -209,6 +209,7 @@ class MyApp(App):
 		c1.add_widget(submit)
 		
 		allposts = rv.RV()
+		allposts.selected="newpost"
 		c2.add_widget(allposts)
 
 

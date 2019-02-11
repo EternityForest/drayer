@@ -4,7 +4,7 @@ import drayer, time
 drayer.startLocalDiscovery()
 #time.sleep(15)
 
-d2 = drayer.DrayerStream("foooClone.stream","H3E55+t/tItsDp/TB053Jr9ppL2WPycRIdp5Gndrzfs=")
+d2 = drayer.DrayerStream("foooClone.stream","ce19HK2F/lWCrMny22086NFW9nssJIuyYC1SAqab7dc=")
 time.sleep(2)
 d2.sync()
 time.sleep(2)
