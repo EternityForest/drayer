@@ -87,27 +87,29 @@ class DrayerWebServer(object):
 
 		cherrypy.response.headers['Content-Type']="application/octet-stream"
 		t = int(t)
-		c = _allStreams[streampk].getRecordsSince(t,streampk)
-		limit = 100
-		l = []
-		for i in c:
-			if limit<1:
-				break
-				limit-=1
-			l.append({
-				"hash":i["hash"],
-				"key":i["key"],
-				"val":i["value"],
-				"id": i["id"],
-				"sig":i["signature"],
-				"prev":i["prev"],
-				"prevch":i["prevchange"],
-				"mod":i["modified"],
-				"chain": streampk
-			})
-	
-		x= msgpack.packb(l)
-		return(x)
+		st = _allStreams[streampk]
+		with st.getConn():
+			c = st.getRecordsSince(t,streampk)
+			limit = 100
+			l = []
+			for i in c:
+				if limit<1:
+					break
+					limit-=1
+				l.append({
+					#"hash":i["hash"],
+					"key":i["key"],
+					"val":i["value"],
+					"id": i["id"],
+					"sig":i["signature"],
+					"prev":i["prev"],
+					"prevch":i["prevchange"],
+					"mod":i["modified"],
+					"chain": streampk
+				})
+		
+			x= msgpack.packb(l)
+			return(x)
 			
 		
 		
@@ -330,35 +332,39 @@ class DrayerStream():
 			if i[b'chain']:
 				if not siblings:
 					siblings=self.getSiblingChains()
-				if not chain in siblings:
-					i[b'chain']
+				if not i[b'chain'] in siblings:
+					raise RuntimeError("We don't track that chain")
 			try:
 				#Internal compressed representation
 				c = i[b'chain']
-
 				if c and not len(c)==32:
 					raise ValueError("Invalid len")
-
 				if c==self.pubkey:
 					c=b''
 				with self.getConn():
+					#We can compute this ourselfves but we validate if it's given
 					h = None
 					if b'hash' in i:
 						h=i[b'hash']
-					
+					print("r",(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],c,url))
+
 					self._insertRecord(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],c,url,hash=h)
 			except:
-				print(traceback.format_exc())
 				return inserted
 			inserted+=1
 		return inserted
 			
-	def checkSignature(self, id,key,h, modified, prev,prevchanged, sig,chain=None):
+	def checkSignature(self, id,key,h, modified, prev,prevchanged, sig,chain=None, value=None):
+
+		"Value is optional, it can telll us why the sig failed sometimes"
 		d = self.getBytesForSignature(id,key,h, modified, prev,prevchanged)
 		try:
 			return libnacl.crypto_sign_verify_detached(sig, d, chain or self.pubkey)
 		except:
-			raise RuntimeError("Bad signture, message id was",id)
+			if value:
+				if not libnacl.crypto_generichash(value)==h:
+					raise RuntimeError("Bad signature likely due to hash mismatch")
+			raise RuntimeError("Bad signture, message id was",id, "on chain ", chain)
 	
 	def isSiblingAtTime(self,chain,t):
 		"Return true if the given chain was considered a sibling at the given time"
@@ -448,8 +454,7 @@ class DrayerStream():
 		if not h==x["hash"]:
 			raise RuntimeError("Bad Hash")
 		
-
-		self.checkSignature(id,x["key"], h,x["modified"], x["prev"],x["prevchange"], x["signature"],chain)
+		self.checkSignature(id,x["key"], h,x["modified"], x["prev"],x["prevchange"], x["signature"],chain, value=x['value'])
 		if self._hasRecordBeenDeleted(id,chain):
 			raise RuntimeError("Record appears valid but was deleted by a later change")
 
@@ -474,11 +479,12 @@ class DrayerStream():
 		
 		if chain==self.pubkey:
 			chain=b''
+
 		h = libnacl.crypto_generichash(r[b'val'])
 		if not h==r[b'hash']:
 			raise RuntimeError("Not even trying to pretend it's valid")
 
-		self.checkSignature(r[b'id'],r[b'key'].decode("utf8"),r[b'hash'], r[b'mod'], r[b'prev'], r[b'prevch'],r[b'sig'],chain)
+		self.checkSignature(r[b'id'],r[b'key'].decode("utf8"),r[b'hash'], r[b'mod'], r[b'prev'], r[b'prevch'],r[b'sig'],chain,value=t[b'val'])
 
 		if not r[b'prevch']< oldrecord["prevchange"]:
 			#We are doing something dangerous, accepting a record
@@ -535,7 +541,7 @@ class DrayerStream():
 
 		self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(r[b'id'],chain))
 		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(r[b'id'],r[b'key'],r[b'val'],r[b'hash'],r[b'mod'],r[b'prev'],r[b'prevch'], r[b'sig'],chain))
-
+		self.validateRecord(r[b'id'],chain)
 
 
 		
@@ -543,7 +549,6 @@ class DrayerStream():
 		#TODO: Removing peers is super confusing. We'll refuse to add any more to their chains.
 		#But if there's already messages will there be race conditions?
 		#RequestURL is the URL that we 
-		print(modified,prevchanged)
 
 		if not self.isSiblingAtTime(chain, modified):
 				raise RuntimeError("Chain must be local chain or a sibling")
@@ -555,12 +560,11 @@ class DrayerStream():
 		
 		#We don't supply a hash because we check it here anyway
 		h= libnacl.crypto_generichash(value)
+
+		#But we can, for better error messages
 		if hash:
 			if not hash==h:
-				#Hash is optional, for better error msgs
-				print(id)
 				raise RuntimeError("Record hash doesn't match data")
-
 		self.checkSignature(id,key, h,modified, prev,prevchanged, signature,chain)
 	
 		#The thing that the old block that we might be replacing used to point at
@@ -575,7 +579,6 @@ class DrayerStream():
 			if modified ==mtip:
 				#Just silently return instead of raising an error for inserting the same record
 				if self.getRecordByModificationTime(modified)["id"]==id:
-					print("Ignoring", modified,id)
 					return
 			raise RuntimeError("Modified time cannot be before the tip of the chain")
 			
@@ -594,22 +597,21 @@ class DrayerStream():
 			#Should do better logic here, but we don't really know what's deleted and what's
 			#replaced with something later on I don't think
 			doUnknownOnChange = True
-			print("mchain gc", prevchanged)
 
 		
 		tip = self.getChainTip(chain)
-		print(tip,prev)
 		if not prev ==tip:
 			#If the record connects to an existing link in the chain,
 			#it's basically forking it, and we should garbage collect everything
 			#In between the new record and where it connects
+
+			#I think this is safe to do for all updates to old blocks
 			if self.getRecordById(prev,chain):
 				if modified<=self.getRecordById(prev,chain)['modified']:
-					raise RuntimeError("Cannot replace newer with older")
+					raise RuntimeError("Cannot connect to newer with older")
 				self.getConn().execute("DELETE FROM record WHERE id>? AND id<?",(prev,id))
 				#TODO: Put in the real changes
 				doUnknownOnChange = True
-				print("idchain gc",prev)
 			elif self.getFirstRecordAfter(id,chain):
 				if self.getFirstRecordAfter(id,chain)['prev']<id:
 					raise ValueError("This record was already deleted")
@@ -657,6 +659,7 @@ class DrayerStream():
 			self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
 		
 		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(id,key,value,h,modified,prev,prevchanged, signature,chain))
+		self.validateRecord(id,chain)
 		try:
 			if didModify:
 				self.onChange("modify", id, key, chain)
@@ -720,11 +723,7 @@ class DrayerStream():
 			#Make a new record for the one right in front of it.
 			#insertRecord will handle patching the one in front of *that*?
 			t = int(time.time()*1000000)
-			print("old", n['id'], n['prev'])
-			print("new", n['id'], p)
-
 			sig=self.makeSignature(n["id"],n["key"], n["hash"],t,p,mtip)
-			print("About to change to",p)
 			self._insertRecord(n["id"],n["key"],n["value"], t,p, mtip,sig,hash=n['hash'])
 
 			if needsPatching:
@@ -768,7 +767,7 @@ class DrayerStream():
 		self.getConn().execute("DELETE FROM record WHERE (id=? AND chain=?)",(rId, chain))
 		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(rId,rKey,rValue,rHash,rMod,rPrev, rPrevch,sig,chain))
 		self.validateRecord(rId,chain)
-		
+
 	def __setitem__(self,k, v):
 		k,v=self.filterInsert(k,v)
 		with self.getConn():
@@ -790,7 +789,11 @@ class DrayerStream():
 
 			h = libnacl.crypto_generichash(v)
 			sig = self.makeSignature(id,k,h,mtime,prev,prevMtime)
-			self._insertRecord(id,k,v,mtime,prev,prevMtime,sig)
+			print("s",id,k,v,mtime,prev,prevMtime,sig)
+
+			self._insertRecord(id,k,v,mtime,prev,prevMtime,sig,hash=h)
+			self.validateRecord(id)
+
 			self.broadcastUpdate()
 		
 	def __getitem__(self,k):
@@ -896,13 +899,11 @@ class DrayerStream():
 		x =self.getRecordById(id,chain)
 		#It doesn't exist, so apperantly yes!
 		if not x:
-			print("Because doesn't exists")
 			return True
 
 		d=False
 		if self.getFirstRecordAfter(id,chain):
 			if self.getFirstRecordAfter(id,chain)['prev']<id:
-				print("id patched")
 				d=True
 
 		#Check if it's been patched out of the mchain
@@ -910,7 +911,6 @@ class DrayerStream():
 		if nextmod:
 			if nextmod['prevchange']<  x['modified']:
 				#This condition means it HAS been deleted
-				print("mod patched by",nextmod['id'], "with ",nextmod['prevchange'], " own ts is ", x['modified']," own id is ",x['id'])
 				d=True
 
 		if d:
@@ -954,7 +954,6 @@ class DrayerStream():
 		c.execute("SELECT * FROM record WHERE prevchange<=? AND chain=? ORDER BY prevchange ASC",(t,chain))
 		x= c.fetchone()
 		if x:
-			print(t, x["id"], x["prevchange"])
 			return x
 		return None
 
@@ -1177,11 +1176,9 @@ def drayerServise():
 					#So we block anything that isn't local.
 					if not isLocal(addr[0]):
 						continue
-					print(addr,d[b"chain"])
 						
 					if d[b"chain"] in _allStreams:
 						try:
-							print(d[b'chain'])
 							x= _allStreams[d[b"chain"]]
 							
 							#Internally we use empty strings to mean the local chain	
@@ -1189,7 +1186,6 @@ def drayerServise():
 								chain = b''
 							else:
 								chain = d[b"chain"]
-							print(chain)
 							if d[b"mod"]> x.getModifiedTip():
 								x.httpSync("http://"+addr[0]+":"+str(d[b"httpport"]),chain)
 						finally:
