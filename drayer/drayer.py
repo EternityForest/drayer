@@ -10,6 +10,10 @@ http_port = random.randint(8000, 48000)
 MCAST_GRP = '224.7.130.8'
 MCAST_PORT = 15723
 
+import hashlib
+def drayer_hash(x):
+	return hashlib.sha256(x).digest()
+
 
 listensock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 listensock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -93,11 +97,12 @@ class DrayerWebServer(object):
 			limit = 100
 			l = []
 			for i in c:
+				st.validateRecord(i["id"],i["chain"])
 				if limit<1:
 					break
 					limit-=1
 				l.append({
-					#"hash":i["hash"],
+					"hash":i["hash"],
 					"key":i["key"],
 					"val":i["value"],
 					"id": i["id"],
@@ -276,8 +281,8 @@ class DrayerStream():
 					
 			
 			if torrentServer:
-				bthash=libnacl.crypto_generichash(chain)
-				bthash=libnacl.crypto_generichash(bthash)[:20]			
+				bthash=drayer_hash(chain)
+				bthash=drayer_hash(bthash)[:20]			
 				#Sync with 5 random DHT nodes. We just hope that eventually we will
 				#get good data.
 				x = torrentServer.get_peers(bthash)
@@ -346,23 +351,27 @@ class DrayerStream():
 					h = None
 					if b'hash' in i:
 						h=i[b'hash']
-					print("r",(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],c,url))
-
 					self._insertRecord(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],c,url,hash=h)
 			except:
+				print(traceback.format_exc())
 				return inserted
 			inserted+=1
 		return inserted
 			
 	def checkSignature(self, id,key,h, modified, prev,prevchanged, sig,chain=None, value=None):
-
+		
+		if chain:
+			if notlen(chain)==32:
+				raise ValueError("Bad key len")
+			if not chain in self.getSiblingChains():
+				raise ValueError("Key is for a chain we do not track")
 		"Value is optional, it can telll us why the sig failed sometimes"
 		d = self.getBytesForSignature(id,key,h, modified, prev,prevchanged)
 		try:
 			return libnacl.crypto_sign_verify_detached(sig, d, chain or self.pubkey)
 		except:
 			if value:
-				if not libnacl.crypto_generichash(value)==h:
+				if not drayer_hash(value)==h:
 					raise RuntimeError("Bad signature likely due to hash mismatch")
 			raise RuntimeError("Bad signture, message id was",id, "on chain ", chain)
 	
@@ -450,7 +459,7 @@ class DrayerStream():
 		if not self.isSiblingAtTime(x["chain"],x["modified"]):
 			raise RuntimeError("Record belongs to a chain that is/was not the local chain or a sibling when it was made")
 
-		h= libnacl.crypto_generichash(x["value"])
+		h= drayer_hash(x["value"])
 		if not h==x["hash"]:
 			raise RuntimeError("Bad Hash")
 		
@@ -480,11 +489,11 @@ class DrayerStream():
 		if chain==self.pubkey:
 			chain=b''
 
-		h = libnacl.crypto_generichash(r[b'val'])
+		h = drayer_hash(r[b'val'])
 		if not h==r[b'hash']:
 			raise RuntimeError("Not even trying to pretend it's valid")
 
-		self.checkSignature(r[b'id'],r[b'key'].decode("utf8"),r[b'hash'], r[b'mod'], r[b'prev'], r[b'prevch'],r[b'sig'],chain,value=t[b'val'])
+		self.checkSignature(r[b'id'],r[b'key'].decode("utf8"),r[b'hash'], r[b'mod'], r[b'prev'], r[b'prevch'],r[b'sig'],chain,value=r[b'val'])
 
 		if not r[b'prevch']< oldrecord["prevchange"]:
 			#We are doing something dangerous, accepting a record
@@ -540,7 +549,7 @@ class DrayerStream():
 			self.getConn().execute("DELETE FROM record WHERE id<=? AND id>? AND chain=?",(oldp,newp,chain))
 
 		self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(r[b'id'],chain))
-		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(r[b'id'],r[b'key'],r[b'val'],r[b'hash'],r[b'mod'],r[b'prev'],r[b'prevch'], r[b'sig'],chain))
+		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(r[b'id'],r[b'key'].decode("utf8"),r[b'val'],r[b'hash'],r[b'mod'],r[b'prev'],r[b'prevch'], r[b'sig'],chain))
 		self.validateRecord(r[b'id'],chain)
 
 
@@ -559,12 +568,12 @@ class DrayerStream():
 		#Most basic test, make sure it's signed correctly
 		
 		#We don't supply a hash because we check it here anyway
-		h= libnacl.crypto_generichash(value)
+		h= drayer_hash(value)
 
 		#But we can, for better error messages
 		if hash:
 			if not hash==h:
-				raise RuntimeError("Record hash doesn't match data")
+				raise RuntimeError("Record hash doesn't match data:",value,hash,h)
 		self.checkSignature(id,key, h,modified, prev,prevchanged, signature,chain)
 	
 		#The thing that the old block that we might be replacing used to point at
@@ -770,6 +779,8 @@ class DrayerStream():
 
 	def __setitem__(self,k, v):
 		k,v=self.filterInsert(k,v)
+
+
 		with self.getConn():
 			id = self._getIdForKey(k)
 			
@@ -787,9 +798,8 @@ class DrayerStream():
 					#so we connect to the record before that and let GC handle it
 					prevMtime = self.getModifiedTipRecord()["prevchange"]
 
-			h = libnacl.crypto_generichash(v)
+			h = drayer_hash(v)
 			sig = self.makeSignature(id,k,h,mtime,prev,prevMtime)
-			print("s",id,k,v,mtime,prev,prevMtime,sig)
 
 			self._insertRecord(id,k,v,mtime,prev,prevMtime,sig,hash=h)
 			self.validateRecord(id)
@@ -815,10 +825,10 @@ class DrayerStream():
 	
 	def filterInsert(self,k,v):
 		"Preprocess values inserted with the dict insert style"
-		return k,v
+		return k,msgpack.packb(v,use_bin_type=True)
 	
 	def filterGet(self,v):
-		return v
+		return msgpack.unpackb(v,raw=False)
 		
 	def announceDHT(self,allChains=False):
 		"Advertise this node on bittorrent"
@@ -837,8 +847,8 @@ class DrayerStream():
 		if allChains:
 			l=self.getSiblingChains()
 		for i in l:
-			bthash=libnacl.crypto_generichash(i)
-			bthash=libnacl.crypto_generichash(bthash)[:20]
+			bthash=drayer_hash(i)
+			bthash=drayer_hash(bthash)[:20]
 			
 			if torrentServer:
 				torrentServer.get_peers(bthash)
