@@ -173,7 +173,7 @@ class DrayerStream():
 			#chain: If empty, it's the default chain. But we can also store "sibling chains" in here. We
 			#would list them by the public key.
 			 
-			c.execute("CREATE TABLE IF NOT EXISTS record (id integer primary key, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob, chain blob);")
+			c.execute("CREATE TABLE IF NOT EXISTS record (id integer, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob, chain blob, UNIQUE(id,chain));")
 
 			self.pubkey=pubkey
 			pk = self.getAttr("PublicKey")
