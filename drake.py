@@ -107,8 +107,16 @@ class DrayerRefresher(drayer.DrayerStream):
 drayer.startServer()
 drayer.startLocalDiscovery()
 
+import atexit
+
+def cleanup():
+    db.close()
+atexit.register(cleanup)
+
 def openStream(x,pk=None):
     global db
+    if(db):
+        db.close()
     db = DrayerRefresher(x,pk)
     rlfun()
 
@@ -239,17 +247,15 @@ def getPublicSocialposts():
     return c
 
 def getOneSocialPost(key):
-    c = db.getConn().cursor()
-    c.execute('SELECT key,value FROM record WHERE key=?',(key,))
-    i= c.fetchone()
-    k=i["key"].split("_",2)
+    d=db[key]
+    k=key.split("_",2)
     t = 12345
     try:
         t = float(k[1])
         title=k[2]
     except:
         title="Untitled"
-    return (title, t, i["value"])
+    return (title, t, d)
 
 class MyApp(App):
 
@@ -261,12 +267,14 @@ class MyApp(App):
 
         c1 = BoxLayout(orientation='vertical')
         c2 = BoxLayout(orientation='vertical')
-        sel = Button(text='Select a File', font_size=14, size_hint=(0.5,1))
-        showpubkey = Button(text='Show the pubkey', font_size=14, size_hint=(0.5,1))
+        sel = Button(text='Select a File', font_size=14, size_hint=(0.3,1))
+        showpubkey = Button(text='Show the pubkey', font_size=14, size_hint=(0.3,1))
+        sync = Button(text='Sync!', font_size=14, size_hint=(0.3,1))
 
 
         buttonbar.add_widget(showpubkey)
         buttonbar.add_widget(sel)
+        buttonbar.add_widget(sync)
 
         layout.add_widget(buttonbar)
         layout.add_widget(body)
@@ -343,10 +351,13 @@ class MyApp(App):
                     newpost.text=''
             else:
                 newposttitle.readonly=True
-                p = getOneSocialPost(post)
-                newposttitle.text = p[0]
-                newpost.text= p[2]
-
+                try:
+                    p = getOneSocialPost(post)
+                    newposttitle.text = p[0]
+                    newpost.text= p[2]
+                except:
+                    presentError()
+               
             oldsel[0] = newpost
 
         allposts.onSelect= onSelect
@@ -365,6 +376,13 @@ class MyApp(App):
                 PubkeyPopup(base64.b64encode(db.pubkey))
             else:
                 presentError("No stream loaded!")
+
+        def sf(inst):
+            if db:
+               db.sync()
+            else:
+                presentError("No stream loaded!")  
+        sync.bind(on_press=sf)    
         showpubkey.bind(on_press=spk)
         submit.bind(on_press=post)
         sel.bind(on_press=FilePopup)
