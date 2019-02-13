@@ -11,6 +11,8 @@ Streams are stored as sqlite files that have an embedded public key. A stream is
 private key(As in "foo.stream" and "foo.stream.privatekey").  As with blockchain and scuttlebutt, only one person can
 write to a stream, because each change still references the last change.
 
+All records have embedded type information as a db column, allowing fast application level queries by type.
+
 
 Absolutely everything subject to change(Just like our fully mutable streams!). Project is a few days old and
 is not even pre-alpha.
@@ -103,7 +105,7 @@ See theory.md and notes.md if you want to know more.
  The signature for a record is computed on the following byte sequence, defined by this
  python code:
  
- `struct.pack("<QqqqL", id,modified,prev, prevchanged,len(key))+key.encode("utf8")+h`
+ `struct.pack("<QqqqL", id,modified,prev, prevchanged,len(key))+key.encode("utf8")+h+type.encode("utf8")`
  
  Where h is the unkeyed hash of the value of that key. The indirection has several useful
  properties.
@@ -111,10 +113,12 @@ See theory.md and notes.md if you want to know more.
 
 ## SQlite Storage
 The actual records are stored in the following table:
-`CREATE TABLE IF NOT EXISTS record (id integer primary key, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob,chain blob);`
+`CREATE TABLE IF NOT EXISTS record (id integer, type text, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob,chain blob);`
 
 The chain entry is normally blank, but we have native support for "sibling chains", so we can store OTHER chains in here that are considered "included"
 when we ask for results. These other chains should sync just like the main chain although we can only add to the main chain.
+
+
 
 The basic "attributes", misc data we store in the file, is kept in:
 `CREATE TABLE IF NOT EXISTS attr (key text, value text);`

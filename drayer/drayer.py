@@ -10,10 +10,8 @@ http_port = random.randint(8000, 48000)
 MCAST_GRP = '224.7.130.8'
 MCAST_PORT = 15723
 
-import hashlib
-def drayer_hash(x):
-	return hashlib.sha256(x).digest()
 
+drayer_hash= libnacl.crypto_generichash
 
 listensock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 listensock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -68,6 +66,7 @@ class DrayerWebServer(object):
 		i = _allStreams[streampk].getChainRepair(old, streampk)
 		x=({
 			"hash":i["hash"],
+			"type":i["type"],
 			"key":i["key"],
 			"val":i["value"],
 			"id": i["id"],
@@ -103,6 +102,7 @@ class DrayerWebServer(object):
 					limit-=1
 				l.append({
 					"hash":i["hash"],
+					"type":i["type"],
 					"key":i["key"],
 					"val":i["value"],
 					"id": i["id"],
@@ -173,7 +173,7 @@ class DrayerStream():
 			#chain: If empty, it's the default chain. But we can also store "sibling chains" in here. We
 			#would list them by the public key.
 			 
-			c.execute("CREATE TABLE IF NOT EXISTS record (id integer, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob, chain blob, UNIQUE(id,chain));")
+			c.execute("CREATE TABLE IF NOT EXISTS record (id integer, type text, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob, chain blob, UNIQUE(id,chain,modified));")
 
 			self.pubkey=pubkey
 			pk = self.getAttr("PublicKey")
@@ -224,26 +224,28 @@ class DrayerStream():
 	def onChange(self,action,id,key, chain):
 		pass
 
-	def getBytesForSignature(self, id,key,h, modified, prev,prevchanged):
+	def getBytesForSignature(self, id,type,key,h, modified, prev,prevchanged):
 		#This is currently the definition of how to make a signature
-		return struct.pack("<QqqqL", id,modified,prev, prevchanged,len(key))+key.encode("utf8")+h
+		return struct.pack("<QqqqL", id,modified,prev, prevchanged,len(key))+key.encode("utf8")+h+type.encode("utf8")
 	
-	def makeSignature(self, id,key, h, modified, prev,prevchanged,chain=None):
+	def makeSignature(self, id,type,key, h, modified, prev,prevchanged,chain=None):
 		if not chain == self.pubkey:
 			if chain:
 				raise ValueError("Can only sign messages on the local chain")
-		d = self.getBytesForSignature(id,key,h, modified, prev,prevchanged)
+		d = self.getBytesForSignature(id,type, key,h, modified, prev,prevchanged)
 		return libnacl.crypto_sign_detached(d, self.privkey)
 		
 	
 	def setPrimaryServers(self, servers):
-		self["__drayer_primary_servers__"] = msgpack.packb(servers)
+		self.rawSetItem("primaryServers", msgpack.packb(servers, "drayer"))
 		
 	def getPrimaryServers(self):
 		#Returns a list of trusted primary servers.
 		#When syncing, we should sync to one of them.
-		return msgpack.unpackb(self["__drayer_primary_servers__"])
-		
+		if self.keyExists("primaryServers","drayer"):
+			return msgpack.unpackb(self.rawGetItemByKey("primaryServers","drayer"))
+		return []
+
 	def sync(self,url=None):
 		"""Syncs with a remote server"""
 		#Don't sync too often
@@ -261,9 +263,10 @@ class DrayerStream():
 			if not self.selectedServer:
 				try:
 					s =self.getPrimaryServers()
-					#Filter by what we know how to handle
-					s = {i:s[i] for i in s if s[i]["type"]=="http"}
-					self.selectedServer = random.choice(s)
+					if s:
+						#Filter by what we know how to handle
+						s = {i:s[i] for i in s if s[i]["type"]=="http"}
+						self.selectedServer = random.choice(s)
 				except KeyError:
 					self.selectedServer = None
 				
@@ -351,14 +354,14 @@ class DrayerStream():
 					h = None
 					if b'hash' in i:
 						h=i[b'hash']
-					self._insertRecord(i[b"id"],i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],c,url,hash=h)
+					self._insertRecord(i[b"id"],i[b'type'].decode('utf8'),i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],c,url,hash=h)
 			except:
 				print(traceback.format_exc())
 				return inserted
 			inserted+=1
 		return inserted
 			
-	def checkSignature(self, id,key,h, modified, prev,prevchanged, sig,chain=None, value=None):
+	def checkSignature(self, id,type,key,h, modified, prev,prevchanged, sig,chain=None, value=None):
 		
 		if chain:
 			if notlen(chain)==32:
@@ -366,7 +369,7 @@ class DrayerStream():
 			if not chain in self.getSiblingChains():
 				raise ValueError("Key is for a chain we do not track")
 		"Value is optional, it can telll us why the sig failed sometimes"
-		d = self.getBytesForSignature(id,key,h, modified, prev,prevchanged)
+		d = self.getBytesForSignature(id,type,key,h, modified, prev,prevchanged)
 		try:
 			return libnacl.crypto_sign_verify_detached(sig, d, chain or self.pubkey)
 		except:
@@ -412,8 +415,11 @@ class DrayerStream():
 		
 		c=self.getConn().cursor()
 		
-		#Note that we read from all siblings. The sibling of our sibling is also our sibling.
-		c.execute('SELECT id FROM record WHERE key="__drayer_siblings__"')
+		#Note that we don't read from all siblings. The sibling of our sibling is also our sibling.
+		#But we are going to handle that with syncing. We need to have a starting place to know
+		#what records are valid to be able to look for the rest
+		
+		c.execute('SELECT id FROM record WHERE key="siblings" and type="drayer" and chain=""')
 		#We're always included in our own
 		periods = {}
 		periods[self.pubkey]={
@@ -452,18 +458,19 @@ class DrayerStream():
 		return {i:(periods[i][b"timestamp"], periods[i][b"from"],periods[i][b"to"]) for i in periods}
 						
 			
-	def validateRecord(self,id, chain=b""):
+	def validateRecord(self,id, chain=b"",allowOtherChains=False):
 		##Make sure a record is actually supposed to be there
 		x = self.getRecordById(id,chain)
-		
-		if not self.isSiblingAtTime(x["chain"],x["modified"]):
-			raise RuntimeError("Record belongs to a chain that is/was not the local chain or a sibling when it was made")
+
+		if not allowOtherChains:
+			if not self.isSiblingAtTime(x["chain"],x["modified"]):
+				raise RuntimeError("Record belongs to a chain that is/was not the local chain or a sibling when it was made")
 
 		h= drayer_hash(x["value"])
 		if not h==x["hash"]:
 			raise RuntimeError("Bad Hash")
 		
-		self.checkSignature(id,x["key"], h,x["modified"], x["prev"],x["prevchange"], x["signature"],chain, value=x['value'])
+		self.checkSignature(id,x["type"], x["key"], h,x["modified"], x["prev"],x["prevchange"], x["signature"],chain, value=x['value'])
 		if self._hasRecordBeenDeleted(id,chain):
 			raise RuntimeError("Record appears valid but was deleted by a later change")
 
@@ -493,7 +500,7 @@ class DrayerStream():
 		if not h==r[b'hash']:
 			raise RuntimeError("Not even trying to pretend it's valid")
 
-		self.checkSignature(r[b'id'],r[b'key'].decode("utf8"),r[b'hash'], r[b'mod'], r[b'prev'], r[b'prevch'],r[b'sig'],chain,value=r[b'val'])
+		self.checkSignature(r[b'id'],r[b'type'].decode("utf8"),r[b'key'].decode("utf8"),r[b'hash'], r[b'mod'], r[b'prev'], r[b'prevch'],r[b'sig'],chain,value=r[b'val'])
 
 		if not r[b'prevch']< oldrecord["prevchange"]:
 			#We are doing something dangerous, accepting a record
@@ -549,12 +556,12 @@ class DrayerStream():
 			self.getConn().execute("DELETE FROM record WHERE id<=? AND id>? AND chain=?",(oldp,newp,chain))
 
 		self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(r[b'id'],chain))
-		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(r[b'id'],r[b'key'].decode("utf8"),r[b'val'],r[b'hash'],r[b'mod'],r[b'prev'],r[b'prevch'], r[b'sig'],chain))
+		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?,?)",(r[b'id'],r[b'type'].decode("utf8"),r[b'key'].decode("utf8"),r[b'val'],r[b'hash'],r[b'mod'],r[b'prev'],r[b'prevch'], r[b'sig'],chain))
 		self.validateRecord(r[b'id'],chain)
 
 
 		
-	def _insertRecord(self, id,key,value, modified, prev,prevchanged, signature, chain=b"", requestURL=None,hash=None):		
+	def _insertRecord(self, id,type,key,value, modified, prev,prevchanged, signature, chain=b"", requestURL=None,hash=None):		
 		#TODO: Removing peers is super confusing. We'll refuse to add any more to their chains.
 		#But if there's already messages will there be race conditions?
 		#RequestURL is the URL that we 
@@ -574,7 +581,7 @@ class DrayerStream():
 		if hash:
 			if not hash==h:
 				raise RuntimeError("Record hash doesn't match data:",value,hash,h)
-		self.checkSignature(id,key, h,modified, prev,prevchanged, signature,chain)
+		self.checkSignature(id,type,key, h,modified, prev,prevchanged, signature,chain)
 	
 		#The thing that the old block that we might be replacing used to point at
 		oldPrev = self._getPrev(id,chain)
@@ -667,7 +674,7 @@ class DrayerStream():
 			
 			self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
 		
-		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(id,key,value,h,modified,prev,prevchanged, signature,chain))
+		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?,?)",(id,type,key,value,h,modified,prev,prevchanged, signature,chain))
 		self.validateRecord(id,chain)
 		try:
 			if didModify:
@@ -732,8 +739,8 @@ class DrayerStream():
 			#Make a new record for the one right in front of it.
 			#insertRecord will handle patching the one in front of *that*?
 			t = int(time.time()*1000000)
-			sig=self.makeSignature(n["id"],n["key"], n["hash"],t,p,mtip)
-			self._insertRecord(n["id"],n["key"],n["value"], t,p, mtip,sig,hash=n['hash'])
+			sig=self.makeSignature(n["id"],n['type'],n["key"], n["hash"],t,p,mtip)
+			self._insertRecord(n["id"],n['type'],n["key"],n["value"], t,p, mtip,sig,hash=n['hash'])
 
 			if needsPatching:
 				self._fixPrevChangePointer(needsPatching['id'])
@@ -770,17 +777,20 @@ class DrayerStream():
 		rMod=n['modified']
 		rValue=n['value']
 		rPrev=n["prev"]
+		rType=n['type']
 		rPrevch = p
 
-		sig=self.makeSignature(rId,rKey, rHash,rMod,rPrev,rPrevch,chain)
+		sig=self.makeSignature(rId,rType, rKey, rHash,rMod,rPrev,rPrevch,chain)
 		self.getConn().execute("DELETE FROM record WHERE (id=? AND chain=?)",(rId, chain))
-		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?)",(rId,rKey,rValue,rHash,rMod,rPrev, rPrevch,sig,chain))
+		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?,?)",(rId,rType,rKey,rValue,rHash,rMod,rPrev, rPrevch,sig,chain))
 		self.validateRecord(rId,chain)
+
 
 	def __setitem__(self,k, v):
 		k,v=self.filterInsert(k,v)
+		self.rawSetItem(k,v, "obj")
 
-
+	def rawSetItem(self,k, v,type):
 		with self.getConn():
 			id = self._getIdForKey(k)
 			
@@ -799,24 +809,34 @@ class DrayerStream():
 					prevMtime = self.getModifiedTipRecord()["prevchange"]
 
 			h = drayer_hash(v)
-			sig = self.makeSignature(id,k,h,mtime,prev,prevMtime)
 
-			self._insertRecord(id,k,v,mtime,prev,prevMtime,sig,hash=h)
+			sig = self.makeSignature(id,type,k,h,mtime,prev,prevMtime)
+
+			self._insertRecord(id,type,k,v,mtime,prev,prevMtime,sig,hash=h)
 			self.validateRecord(id)
 
 			self.broadcastUpdate()
-		
+	
 	def __getitem__(self,k):
+		return self.filterGet(self.rawGetItemByKey(k,"obj"))
+
+
+	def keyExists(self, k, t):
+		for i in self._getRecordsForKey(k,t):
+			return True
+		return False
+	def rawGetItemByKey(self,k,t):
+		"Gets an item by key. Could be in any chain at all, including the random subchains"
 		e = None
 		#There could be multiple records for a key.
 		#We should have deleted expired ones, but it may be that a no-longer-valid
 		#Sibling has recent keys that will fail vaildation, and we want to return to our own verision
 		
 		#So we try records till we get a valid one
-		for i in self._getRecordsForKey(k):
+		for i in self._getRecordsForKey(k,t):
 			try:
 				self.validateRecord(i["id"],i["chain"])
-				return self.filterGet(i["value"])
+				return i['value']
 			except Exception as q:
 				e=q
 			
@@ -863,10 +883,10 @@ class DrayerStream():
 		if x:
 			return x[0]
 			
-	def _getRecordsForKey(self, key):
+	def _getRecordsForKey(self, key,type):
 		"Returns all records for a key, most recent first"
 		c=self.getConn().cursor()
-		c.execute("SELECT * FROM record WHERE key=? ORDER BY modified desc",(key,))
+		c.execute("SELECT * FROM record WHERE key=? AND type=? ORDER BY modified desc",(key,type))
 		return c
 			
 	def broadcastUpdate(self, addr= (MCAST_GRP,MCAST_PORT),chain=b""):
