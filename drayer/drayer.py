@@ -591,22 +591,22 @@ class DrayerStream():
 
 		#It is possible, but unlikely that so much has been deleted
 		#That a completely new  record points all the way back there.
-		#However, in that case it would not be changing history I don't think
+		#However, in that case it would not be changing history I don't think,
+		#Because all that "history" would just be old versions we don't want.
+		
 		#So this functions should't ever have to handle that.
 		#And we raise an exception
-
 		if beingReplaced:
-
-			if not r[b'prevch']<= beingReplaced['prevchange']:
+			#We don't allow the pointers to move forwards on old records
+			#And the mod tome wouldn't stay the same for anything
+			#but a patch
+			if not r[b'prevch']< beingReplaced['prevchange']:
 				raise RuntimeError("Sanity check fail")
 
-			if not r[b'prevch']== beingReplaced['prevchange']:
-				#Especially in the case of the back entry,
-				#We may replace something with one that points to the same
-				#Place. The new entry must be newer in this case.
-
-				if not r[b'mod']>beingReplaced['modified']:
-					raise RuntimeError("Refusing to replace with older block")
+			# I believe there is no reason ever to replace a block
+			# with an older block
+			if r[b'mod']<beingReplaced['modified']:
+				raise RuntimeError("Refusing to replace with older block")
 
 
 			#Only accept records if they actually fix our chain problem
@@ -701,7 +701,7 @@ class DrayerStream():
 			#Imaginary block 0.
 			if prevchanged:
 				#And of course we have the exception for linking to the back
-				raise ValueError("New records must connect to an existing value in the mchain, or must connect to the back of the chain.")
+				raise ValueError("New records must connect to an existing value in the mchain, or must connect to the back of the chain. pointer was:"+str(prevchanged))
 				
 
 			#Actually delete anything it patches out in the mchain
@@ -731,7 +731,10 @@ class DrayerStream():
 			else:
 				#In the "Silent patch" we replace with the same
 				#But we never replace a record with an older version
-				if modified<self.getRecordById(id,chain)['modified']:
+
+				x = self.getRecordById(id,chain)
+				##TODO why is if x needed?
+				if x and modified<x['modified']:
 					raise RuntimeError("Cannot replace newer with older")
 
 		oldRecord = self.getRecordById(id, chain)
@@ -805,12 +808,6 @@ class DrayerStream():
 		#
 		c = self.getConn().cursor()
 		
-		#TODO: Iterate up and try to connect unlinked
-		if self.allowUnlinkedRecords:
-			pass
-			#c.execute("UPDATE modified FROM record WHERE chain=? AND prevchange=?",(chain, b'unlinked:'+chain, modified))")
-			#self.getConn().execute("UPDATE record SET chain=? WHERE chain=? AND prevchange=?",(chain, b'unlinked:'+chain, modified))
-				
 					
 	def __delitem__(self,k):
 		self.rawDelete(k,"obj")
@@ -846,7 +843,15 @@ class DrayerStream():
 			#delete may also need patching
 			needsPatching2 = self.getNextModifiedRecord(torm["modified"])
 
+			#Same record, only patch
+			if needsPatching2==needsPatching:
+				needsPatching=None
 
+			#Copy IDs, records may change
+			if needsPatching:
+				needsPatching= needsPatching["id"]
+			if needsPatching2:
+				needsPatching2=needsPatching2['id']
 			#Can't connect to the one we're about to delete either
 			if mtip== torm['modified']:
 				x = self.getRecordByModificationTime(torm["prevchange"])
@@ -864,16 +869,18 @@ class DrayerStream():
 			self._insertRecord(n["id"],n['type'],n["key"],n["value"], t,p, mtip,sig,hash=n['hash'])
 
 			if needsPatching:
-				self._fixPrevChangePointer(needsPatching['id'])
+				self._fixPrevChangePointer(needsPatching)
 
 			#There may be 2 different records we must patch
 			if needsPatching2:
-				self._fixPrevChangePointer(needsPatching2['id'])
+				self._fixPrevChangePointer(needsPatching2)
 		self.broadcastUpdate()
 	
 			
-	def _fixPrevChangePointer(self,n,chain=b'',p=None):
-		n=self.getRecordById(n,chain)
+	def _fixPrevChangePointer(self,id,chain=b'',p=None):
+		n=self.getRecordById(id,chain)
+		if n==None:
+			raise RuntimeError(str(id))
 		c = self.getConn().cursor()
 		#If the chain is otherwise consistent, the most recent record before this one is the one
 		#We should be pointing at
@@ -1097,7 +1104,7 @@ class DrayerStream():
 		if chain==self.pubkey:
 			chain=b''
 		c=self.getConn().cursor()
-		c.execute("SELECT * FROM record WHERE prevchange<=? AND chain=? ORDER BY prevchange ASC",(t,chain))
+		c.execute("SELECT * FROM record WHERE prevchange<=? AND chain=? ORDER BY prevchange DESC",(t,chain))
 		x= c.fetchone()
 		if x:
 			return x
@@ -1108,7 +1115,7 @@ class DrayerStream():
 		if chain==self.pubkey:
 			chain=b''
 		c=self.getConn().cursor()
-		c.execute("SELECT * FROM record WHERE prevchange=? AND chain=?",(t,chain))
+		c.execute("SELECT * FROM record WHERE prevchange=? AND chain=? ORDER BY modified DESC",(t,chain))
 		x= c.fetchone()
 		if x:
 			return x
@@ -1123,58 +1130,27 @@ class DrayerStream():
 			return x
 		return 0	
 
-	def canConnectToModifiedChain(self,t,chain=b''):
-		"Returns true if t is within the min and max values of the mod chain"
-		c=self.getConn().cursor()
-		tip = self.getModifiedTip(chain)
-		if t>tip:
-			return False
-		
-		#0 is the universal connector, if we connect to 0 we know
-		#there's nothing before
-		if t==0:
-			return True 
-		#We don't accept things that are just floating in space before the chain start
-		c.execute("SELECT * FROM record WHERE modified<=t AND chain=?",(t,chain))
-		x= c.fetchone()
-		if x:
-			return True
-		return 0	
-				
 	def getRecordById(self,id,chain=b''):
 		c=self.getConn().cursor()
-		if not self.allowUnlinkedRecords:
-			c.execute("SELECT * FROM record WHERE id=? AND chain=? ORDER BY modified DESC",(id,chain))
-		else:
-			c.execute("SELECT * FROM record WHERE id=? AND (chain=? OR chain=?) ORDER BY modified DESC",(id,chain,b'unlinked:'+chain))
+		c.execute("SELECT * FROM record WHERE id=? AND chain=? ORDER BY modified DESC",(id,chain))
 		return c.fetchone()
 
 	def getFirstRecordAfter(self,id,chain=b''):
 		c=self.getConn().cursor()
-		if not self.allowUnlinkedRecords:
-			c.execute("SELECT * FROM record WHERE id>? AND chain=? ORDER BY id ASC,modified DESC",(id,chain))
-		else:	
-			c.execute("SELECT * FROM record WHERE id>? AND (chain=? OR chain=?) ORDER BY id ASC,modified DESC",(id,chain,b'unlinked'+chain))
-
+		c.execute("SELECT * FROM record WHERE id>? AND chain=? ORDER BY id ASC,modified DESC",(id,chain))
 		return c.fetchone()		
 
 	def getFirstModifiedRecordAfter(self,m,chain=b''):
 		c=self.getConn().cursor()
-		if not self.allowUnlinkedRecords:
-			c.execute("SELECT * FROM record WHERE modified>? AND chain=? ORDER BY modified ASC",(m,chain))
-		else:	
-			c.execute("SELECT * FROM record WHERE modified>? AND (chain=? OR chain=?) ORDER BY modified ASC",(m,chain,b'unlinked:'+chain))
+		c.execute("SELECT * FROM record WHERE modified>? AND chain=? ORDER BY modified ASC",(m,chain))
 
 		return c.fetchone()			
 
 	def getChainTip(self,chain=b''):			
 		"Gets the record at the tip of the record chain"
 		c=self.getConn().cursor()
-		if not self.allowUnlinkedRecords:
-			c.execute("SELECT id FROM record WHERE chain=? ORDER BY id DESC, modified DESC",(chain,))
-		else:
-			c.execute("SELECT id FROM record WHERE (chain=? OR chain=?) ORDER BY id DESC, modified DESC",(chain, b'unlinked:'+chain))
-
+		c.execute("SELECT id FROM record WHERE chain=? ORDER BY id DESC, modified DESC",(chain,))
+	
 		x=c.fetchone()
 		if not x==None:
 			return x[0]
