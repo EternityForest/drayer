@@ -243,16 +243,16 @@ def PubkeyPopup(x):
 
 def getPublicSocialposts():
     c = db.getConn().cursor()
-    c.execute('SELECT key,value FROM record WHERE key LIKE "PublicSocialPost%" ORDER BY id desc')
+    c.execute('SELECT key,value FROM record WHERE type="publicSocialPost" ORDER BY id desc')
     return c
 
 def getOneSocialPost(key):
-    d=db[key]
-    k=key.split("_",2)
+    d=db.rawGetItemByKey(key,'publicSocialPost')
+    k=key.split(":",1)
     t = 12345
     try:
-        t = float(k[1])
-        title=k[2]
+        t = float(k[0])
+        title=k[1]
     except:
         title="Untitled"
     return (title, t, d)
@@ -309,11 +309,11 @@ class MyApp(App):
                 try:
                     d = [{"text":"Create New Post", "value":"newpost"}]
                     for i in getPublicSocialposts():
-                        k=i["key"].split("_",2)
+                        k=i["key"].split(":",1)
                         t = 12345
                         try:
-                            t = float(k[1])
-                            title=k[2]
+                            t = float(k[0])
+                            title=k[1]
                         except:
                             title="Untitled"
                         d.append({"text":time.strftime("%Y %b %d %I:%M%p",time.gmtime(t))+" "+title,"value":i['key']})
@@ -336,7 +336,7 @@ class MyApp(App):
             def f(y):
                 if y:
                     try:
-                        del db[allposts.selected]
+                        db.rawDelete(allposts.selected,"publicSocialPost")
                         rf()
                     except:
                         presentError(traceback.format_exc())
@@ -364,12 +364,12 @@ class MyApp(App):
 
         def post(instance):
             if allposts.selected=="newpost":
-                db["PublicSocialPost_"+str(time.time())+"_"+newposttitle.text] = newpost.text
+                db.rawSetItem(str(time.time())+":"+newposttitle.text, newpost.text.encode("utf8"),"publicSocialPost")
                 newpost.text = ''
                 newposttitle.text =''
                 rf()
             else:
-                db[allposts.selected]=newpost.text
+                db.rawSetItem(allposts.selected, newpost.text.encode("utf8"),"publicSocialPost")
         
         def spk(inst):
             if db:

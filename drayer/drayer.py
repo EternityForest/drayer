@@ -13,6 +13,11 @@ MCAST_PORT = 15723
 
 drayer_hash= libnacl.crypto_generichash
 
+def drayer_hash(d):
+	if not isinstance(d, bytes):
+		raise TypeError
+	return libnacl.crypto_generichash(d)
+
 listensock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 listensock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 listensock.bind(("", MCAST_PORT))
@@ -50,6 +55,14 @@ class DrayerWebServer(object):
 	def index(self):
 		return "Hello World!"
 
+	@cherrypy.expose
+	def webacess(self, streampk, type, key):
+		streampk=decode_base64(streampk)
+		if not len(streampk)==32:
+			raise ValueError("PK must be 32 bytes")
+
+		#cherrypy.response.headers['Content-Type']="application/octet-stream"
+		return _allStreams[streampk].rawGetItemByKey(key, type)		
 	@cherrypy.expose
 	def crdr(self, streampk, old):
 		"""Asks the node for the block that points to old in the modified chain.
@@ -152,6 +165,16 @@ class DrayerStream():
 		
 		self.tloc = threading.local()
 
+		#If this is true, we have special "subchains" beginning with
+		# "unlinked:". If we get a block that connects to some future block,
+		#We put in in the unlinked area, and treat it like it was part of the primary
+		#Chain, except we do not consider those records to be part of the modified chain,
+		#and sync will try to stack blocks onto the "real" chain.
+
+		#In effect, everything functions normally, except we may be able to get "previews"
+		#Of future blocks we haven't actually recieved yet.
+		self.allowUnlinkedRecords=False
+		
 		if fn:
 			self.conn=sqlite3.connect(fn)
 			self.conn.row_factory = sqlite3.Row
@@ -220,6 +243,35 @@ class DrayerStream():
 			self.tloc.conn=sqlite3.connect(self.fn)
 			self.tloc.conn.row_factory = sqlite3.Row
 			return self.tloc.conn
+
+	def importFiles(self, dir, deletemissing=False, limit=50*1024*1024):
+		if not dir.endswith("/"):
+			dir +="/"
+
+		for b,d,f in os.path.walk(dir):
+			for i in f:
+				fn = os.path.join(b,f)
+				if os.path.getsize(fn)>limit:
+					continue
+
+				with open(fn) as fd:
+					data=fd.read()
+				relpath = fn[len(dir):]
+				#Placehold for header len
+				self.rawSetItem(relpath, b'\0\0\0\0'+data, "file")
+		if deletemissing:
+			c=self.getConn().cursor()
+			c.execute('SELECT key from record where type="file"')
+			torm = []
+			for i in c:
+				if not os.path.exists(os.path.join(dir,i[0])):
+					torm.append(i[0])
+			c.close()
+			for i in torm:
+				try:
+					self.rawDelete(i,"file")
+				except:
+					logging.exception("Failed to delete file "+i)
 
 	def onChange(self,action,id,key, chain):
 		pass
@@ -411,7 +463,7 @@ class DrayerStream():
 			The actual DrayerSiblings record format is just a list of msgpack dicts.
 		"""	
 		
-		#TODO: actually implement this
+		#TODO: actually implement this. It's nowhere near a real thing yet.
 		
 		c=self.getConn().cursor()
 		
@@ -458,7 +510,7 @@ class DrayerStream():
 		return {i:(periods[i][b"timestamp"], periods[i][b"from"],periods[i][b"to"]) for i in periods}
 						
 			
-	def validateRecord(self,id, chain=b"",allowOtherChains=False):
+	def validateRecord(self,id, chain=b"",allowOtherChains=False, allowMetaOnly=False):
 		##Make sure a record is actually supposed to be there
 		x = self.getRecordById(id,chain)
 
@@ -466,14 +518,41 @@ class DrayerStream():
 			if not self.isSiblingAtTime(x["chain"],x["modified"]):
 				raise RuntimeError("Record belongs to a chain that is/was not the local chain or a sibling when it was made")
 
+		if not isinstance(x['value'],bytes):
+			raise TypeError
+
 		h= drayer_hash(x["value"])
 		if not h==x["hash"]:
-			raise RuntimeError("Bad Hash")
+			if x['hash'] == b'':
+				if allowMetaOnly:
+					pass
+				else:
+					raise RuntimeError("This is a metadata-only record or obsolete record") 
+			else:
+				raise RuntimeError("Bad Hash")
 		
 		self.checkSignature(id,x["type"], x["key"], h,x["modified"], x["prev"],x["prevchange"], x["signature"],chain, value=x['value'])
 		if self._hasRecordBeenDeleted(id,chain):
 			raise RuntimeError("Record appears valid but was deleted by a later change")
 
+
+
+	def _requestAllChainRepair(self,url):
+		"Try to clean up any obsolete records by getting the chain repair data"
+		c = self.getConn().cursor()
+
+		c.excecute("SELECT * FROM record WHERE value=? LIMIT 5",(b'OBSOLETE'))
+
+		for i in c:
+			try:
+				#You never know, someone could actually put literally the
+				#word obsolete there
+				if not(i['hash']==drayer_hash(b'OBSOLETE')):
+					self._requestChainRepair(url,i['prevchange'],i,i['chain'])
+			except:
+				print(traceback.format_exc())
+				break
+		
 
 		
 	def _requestChainRepair(self,url, pdest, oldrecord,chain):
@@ -553,8 +632,15 @@ class DrayerStream():
 		
 		#Quickly garbage collect any values that this change obsoletes
 		if not newp==oldp:
-			self.getConn().execute("DELETE FROM record WHERE id<=? AND id>? AND chain=?",(oldp,newp,chain))
+			if self.allowUnlinkedRecords:
+				self.getConn().execute("DELETE FROM record WHERE id<=? AND id>? AND chain=?",(oldp,newp,b'unlinked:'+chain))
 
+			self.getConn().execute("DELETE FROM record WHERE id<=? AND id>? AND chain=?",(oldp,newp,chain))
+		
+		#The unlinked chain doesn't have to have any kind of real integrity.
+		if self.allowUnlinkedRecords:
+				self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(r[b'id'],b'unlinked:'+chain))
+		
 		self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(r[b'id'],chain))
 		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?,?)",(r[b'id'],r[b'type'].decode("utf8"),r[b'key'].decode("utf8"),r[b'val'],r[b'hash'],r[b'mod'],r[b'prev'],r[b'prevch'], r[b'sig'],chain))
 		self.validateRecord(r[b'id'],chain)
@@ -566,11 +652,36 @@ class DrayerStream():
 		#But if there's already messages will there be race conditions?
 		#RequestURL is the URL that we 
 
+
+		#SQLite isn't strongly typed and this is how we keep corruption out
+		if not isinstance(value,bytes):
+			raise TypeError()
+		if not isinstance(id, int):
+			raise TypeError()
+		if not isinstance(prev, int):
+			raise TypeError()
+		if not isinstance(prevchanged, int):
+			raise TypeError()
+		if not isinstance(modified, int):
+			raise TypeError()
+		if not isinstance(type, str):
+			raise TypeError()
+		if not isinstance(key, str):
+			raise TypeError()
+		if not isinstance(signature, bytes):
+			raise TypeError()
+			
+			
 		if not self.isSiblingAtTime(chain, modified):
 				raise RuntimeError("Chain must be local chain or a sibling")
 		
 		if chain==self.pubkey:
 			chain=b''
+
+		#The chain we are going to store it in.
+		#We may validate against the chain for all but one check,
+		#then store it in a different special chain for caching things.
+		actualChain = chain
 			
 		#Most basic test, make sure it's signed correctly
 		
@@ -605,9 +716,12 @@ class DrayerStream():
 			#Always allow the special case of the thing that's supposed to point at the very start,
 			#Imaginary block 0.
 			if prevchanged:
-				#And of course we have the exception for linking to the back
-				raise ValueError("New records must connect to an existing value in the mchain, or must connect to the back of the chain.")
-			
+				if not self.allowUnlinkedRecords:
+					#And of course we have the exception for linking to the back
+					raise ValueError("New records must connect to an existing value in the mchain, or must connect to the back of the chain.")
+				else:
+					actualchain= b"unlinked:"+chain
+
 			#Actually delete anything it patches out in the mchain
 			self.getConn().execute("DELETE FROM record WHERE modified<? ",(prevchanged,))
 			#Should do better logic here, but we don't really know what's deleted and what's
@@ -633,9 +747,10 @@ class DrayerStream():
 					raise ValueError("This record was already deleted")
 			
 			else:
-				pass
-				#if modified<=self.getRecordById(id,chain)['modified']:
-				#	raise RuntimeError("Cannot replace newer with older")
+				#In the "Silent patch" we replace with the same
+				#But we never replace a record with an older version
+				if modified<self.getRecordById(id,chain)['modified']:
+					raise RuntimeError("Cannot replace newer with older")
 
 		oldRecord = self.getRecordById(id, chain)
 
@@ -647,6 +762,7 @@ class DrayerStream():
 		#chain doesn't matter, only the last block. Anyone getting new data gets the new,
 		#anyone else doesn't care
 		didModify = False
+		unpatchedChain = False
 		if oldRecord:		
 			didModify=True		
 			#The record in front that we need to patch
@@ -668,12 +784,24 @@ class DrayerStream():
 					
 					#The oldrecord parameter we pass is thenext record, because the next
 					#record is the one we need to replace to mess with this record.
-					self._requestChainRepair(requestURL, p, n, chain)
+					try:
+						self._requestChainRepair(requestURL, p, n, chain)
+					except:
+						logging.exception("Could not get chain repair data")
+						unpatchedChain = True
 				else:
-					raise RuntimeError("That record would break the chain. To insert it you must supply a URL that can provide repair data.")
+					unpatchedChain=True
 			
-			self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
-		
+			if not unpatchedChain:
+				self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
+			else:
+				#So much other stuff needs to happen for this to work..
+				if False:#self.allowObsolete:
+					self.getConn().execute('INSERT INTO obsolete VALUES (?,?,?)'(id, modified, chain))
+					self.getConn().execute('UPDATE record SET value=? WHERE id=? AND chain=?',(b"", id,chain))
+				else:
+					raise RuntimeError("That record would break the chain. To insert it you must supply a URL that can provide repair data, or allow keeping obsolete records.")
+
 		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?,?)",(id,type,key,value,h,modified,prev,prevchanged, signature,chain))
 		self.validateRecord(id,chain)
 		try:
@@ -692,10 +820,21 @@ class DrayerStream():
 			if not oldPrev==prev:
 				#If we changed prev we need to garbage collect the unreachable node.
 				self._hasRecordBeenDeleted(oldPrev,chain)
+		#
+		c = self.getConn().cursor()
+		
+		#TODO: Iterate up and try to connect unlinked
+		if self.allowUnlinkedRecords:
+			pass
+			#c.execute("UPDATE modified FROM record WHERE chain=? AND prevchange=?",(chain, b'unlinked:'+chain, modified))")
+			#self.getConn().execute("UPDATE record SET chain=? WHERE chain=? AND prevchange=?",(chain, b'unlinked:'+chain, modified))
 				
 					
 	def __delitem__(self,k):
-		id = self._getIdForKey(k)
+		self.rawDelete(k,"obj")
+
+	def rawDelete(self,k,t):
+		id = self._getIdForKey(k,t)
 		with self.getConn():
 			if not id:
 				raise KeyError(k)
@@ -792,7 +931,7 @@ class DrayerStream():
 
 	def rawSetItem(self,k, v,type):
 		with self.getConn():
-			id = self._getIdForKey(k)
+			id = self._getIdForKey(k, type)
 			
 			if not id:
 				id= self.getChainTip()+1
@@ -875,10 +1014,10 @@ class DrayerStream():
 				torrentServer.announce_peer(bthash, http_port,0,False)
 			
 		
-	def _getIdForKey(self, key):
+	def _getIdForKey(self, key,type, chain=b''):
 		"Returns the ID of the most recent record with a given key"
 		c=self.getConn().cursor()
-		c.execute("SELECT id FROM record WHERE key=? ORDER BY modified desc",(key,))
+		c.execute("SELECT id FROM record WHERE key=? AND type=? AND chain=? ORDER BY modified desc",(key,type,chain))
 		x = c.fetchone()
 		if x:
 			return x[0]
@@ -920,11 +1059,6 @@ class DrayerStream():
 	
 	def _hasRecordBeenDeleted(self,id,chain=b""):
 		"Returns True, and also deletes the record for real, if it should be garbage collected because its unreachable"
-		#The chain tip is obviously still good
-		t = self.getChainTip(chain)
-		if id==t:
-			return False
-	
 
 		x =self.getRecordById(id,chain)
 		#It doesn't exist, so apperantly yes!
@@ -955,7 +1089,7 @@ class DrayerStream():
 	def _getPrev(self,id,chain=b''):
 		"Returns the id of the previous block in the chain"
 		c=self.getConn().cursor()
-		c.execute("SELECT prev FROM record WHERE id=? AND chain=?",(id,chain))
+		c.execute("SELECT prev FROM record WHERE id=? AND chain=? ORDER BY modified desc",(id,chain))
 		x= c.fetchone()
 		if x:
 			return x[0]
@@ -964,7 +1098,7 @@ class DrayerStream():
 	def _getNextRecord(self,id,chain=b''):
 		"Returns the previous block in the chain"
 		c=self.getConn().cursor()
-		c.execute("SELECT * FROM record WHERE prev=? AND chain=?",(id,chain))
+		c.execute("SELECT * FROM record WHERE prev=? AND chain=? ORDER BY modified desc",(id,chain))
 		x= c.fetchone()
 		if x:
 			return x
@@ -1027,23 +1161,38 @@ class DrayerStream():
 				
 	def getRecordById(self,id,chain=b''):
 		c=self.getConn().cursor()
-		c.execute("SELECT * FROM record WHERE id=? AND chain=?",(id,chain))
+		if not self.allowUnlinkedRecords:
+			c.execute("SELECT * FROM record WHERE id=? AND chain=? ORDER BY modified DESC",(id,chain))
+		else:
+			c.execute("SELECT * FROM record WHERE id=? AND (chain=? OR chain=?) ORDER BY modified DESC",(id,chain,b'unlinked:'+chain))
 		return c.fetchone()
 
 	def getFirstRecordAfter(self,id,chain=b''):
 		c=self.getConn().cursor()
-		c.execute("SELECT * FROM record WHERE id>? AND chain=? ORDER BY id ASC",(id,chain))
+		if not self.allowUnlinkedRecords:
+			c.execute("SELECT * FROM record WHERE id>? AND chain=? ORDER BY id ASC,modified DESC",(id,chain))
+		else:	
+			c.execute("SELECT * FROM record WHERE id>? AND (chain=? OR chain=?) ORDER BY id ASC,modified DESC",(id,chain,b'unlinked'+chain))
+
 		return c.fetchone()		
 
 	def getFirstModifiedRecordAfter(self,m,chain=b''):
 		c=self.getConn().cursor()
-		c.execute("SELECT * FROM record WHERE modified>? AND chain=? ORDER BY modified ASC",(m,chain))
+		if not self.allowUnlinkedRecords:
+			c.execute("SELECT * FROM record WHERE modified>? AND chain=? ORDER BY modified ASC",(m,chain))
+		else:	
+			c.execute("SELECT * FROM record WHERE modified>? AND (chain=? OR chain=?) ORDER BY modified ASC",(m,chain,b'unlinked:'+chain))
+
 		return c.fetchone()			
 
-	def getChainTip(self,chain=b''):
+	def getChainTip(self,chain=b''):			
 		"Gets the record at the tip of the record chain"
 		c=self.getConn().cursor()
-		c.execute("SELECT id FROM record WHERE chain=? ORDER BY id DESC",(chain,))
+		if not self.allowUnlinkedRecords:
+			c.execute("SELECT id FROM record WHERE chain=? ORDER BY id DESC, modified DESC",(chain,))
+		else:
+			c.execute("SELECT id FROM record WHERE (chain=? OR chain=?) ORDER BY id DESC, modified DESC",(chain, b'unlinked:'+chain))
+
 		x=c.fetchone()
 		if not x==None:
 			return x[0]
@@ -1052,7 +1201,7 @@ class DrayerStream():
 	def getChainBackPointer(self,chain=b""):
 		"Gets whatever the back record is pointing to. If it's not 0, we don't have full history"
 		c=self.getConn().cursor()
-		c.execute("SELECT prev FROM record WHERE chain=? ORDER BY id ASC",(chain,))
+		c.execute("SELECT prev FROM record WHERE chain=? ORDER BY id ASC, modified DESC",(chain,))
 		x=c.fetchone()
 		if not x==None:
 			return x[0]
