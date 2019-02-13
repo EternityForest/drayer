@@ -164,16 +164,6 @@ class DrayerStream():
 		self.selectedServer= None
 		
 		self.tloc = threading.local()
-
-		#If this is true, we have special "subchains" beginning with
-		# "unlinked:". If we get a block that connects to some future block,
-		#We put in in the unlinked area, and treat it like it was part of the primary
-		#Chain, except we do not consider those records to be part of the modified chain,
-		#and sync will try to stack blocks onto the "real" chain.
-
-		#In effect, everything functions normally, except we may be able to get "previews"
-		#Of future blocks we haven't actually recieved yet.
-		self.allowUnlinkedRecords=False
 		
 		if fn:
 			self.conn=sqlite3.connect(fn)
@@ -632,15 +622,9 @@ class DrayerStream():
 		
 		#Quickly garbage collect any values that this change obsoletes
 		if not newp==oldp:
-			if self.allowUnlinkedRecords:
-				self.getConn().execute("DELETE FROM record WHERE id<=? AND id>? AND chain=?",(oldp,newp,b'unlinked:'+chain))
-
 			self.getConn().execute("DELETE FROM record WHERE id<=? AND id>? AND chain=?",(oldp,newp,chain))
 		
-		#The unlinked chain doesn't have to have any kind of real integrity.
-		if self.allowUnlinkedRecords:
-				self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(r[b'id'],b'unlinked:'+chain))
-		
+
 		self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(r[b'id'],chain))
 		self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?,?)",(r[b'id'],r[b'type'].decode("utf8"),r[b'key'].decode("utf8"),r[b'val'],r[b'hash'],r[b'mod'],r[b'prev'],r[b'prevch'], r[b'sig'],chain))
 		self.validateRecord(r[b'id'],chain)
@@ -716,11 +700,9 @@ class DrayerStream():
 			#Always allow the special case of the thing that's supposed to point at the very start,
 			#Imaginary block 0.
 			if prevchanged:
-				if not self.allowUnlinkedRecords:
-					#And of course we have the exception for linking to the back
-					raise ValueError("New records must connect to an existing value in the mchain, or must connect to the back of the chain.")
-				else:
-					actualchain= b"unlinked:"+chain
+				#And of course we have the exception for linking to the back
+				raise ValueError("New records must connect to an existing value in the mchain, or must connect to the back of the chain.")
+				
 
 			#Actually delete anything it patches out in the mchain
 			self.getConn().execute("DELETE FROM record WHERE modified<? ",(prevchanged,))
