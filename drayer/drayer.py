@@ -1,7 +1,8 @@
 
 import libnacl,os,sqlite3,struct,time,weakref,msgpack,requests, socket,threading,select,urllib,random,traceback
-import logging
+import logging,gzip, io
 from base64 import b64decode, b64encode
+import webbrowser
 
 import cherrypy
 
@@ -56,13 +57,32 @@ class DrayerWebServer(object):
 		return "Hello World!"
 
 	@cherrypy.expose
-	def webacess(self, streampk, type, key):
+	def rawwebacess(self, streampk, type, key):
+		streampk=decode_base64(streampk)
+		if not len(streampk)==32:
+			raise ValueError("PK must be 32 bytes")
+		
+		#cherrypy.response.headers['Content-Type']="application/octet-stream"
+		return _allStreams[streampk].rawGetItemByKey(key, type)	
+
+	@cherrypy.expose
+	def webAccess(self, streampk, key):
 		streampk=decode_base64(streampk)
 		if not len(streampk)==32:
 			raise ValueError("PK must be 32 bytes")
 
 		#cherrypy.response.headers['Content-Type']="application/octet-stream"
-		return _allStreams[streampk].rawGetItemByKey(key, type)		
+		f = _allStreams[streampk].rawGetItemByKey(key, "file")
+		l = struct.unpack("<L",f[:4])[0]
+		h = f[4:4+l]
+		d=f[4+l:]
+		h=msgpack.unpackb(h,raw=False)
+
+		if "enc" in h:
+			cherrypy.response.headers['Content-Encoding']=h['enc']
+
+		return d
+
 	@cherrypy.expose
 	def crdr(self, streampk, old):
 		"""Asks the node for the block that points to old in the modified chain.
@@ -92,7 +112,6 @@ class DrayerWebServer(object):
 	
 		x= msgpack.packb(x)
 		return(x)
-			
        
 	@cherrypy.expose
 	def newRecords(self, streampk, t):
@@ -235,20 +254,20 @@ class DrayerStream():
 			return self.tloc.conn
 
 	def importFiles(self, dir, deletemissing=False, limit=50*1024*1024):
+		if not os.path.exists(dir):
+			raise RuntimeError("Bad dir")
 		if not dir.endswith("/"):
 			dir +="/"
 
-		for b,d,f in os.path.walk(dir):
+		for b,d,f in os.walk(dir):
 			for i in f:
-				fn = os.path.join(b,f)
+				fn = os.path.join(b,i)
 				if os.path.getsize(fn)>limit:
 					continue
 
-				with open(fn) as fd:
-					data=fd.read()
 				relpath = fn[len(dir):]
-				#Placehold for header len
-				self.rawSetItem(relpath, b'\0\0\0\0'+data, "file")
+				self.insertFile(relpath, fn)
+
 		if deletemissing:
 			c=self.getConn().cursor()
 			c.execute('SELECT key from record where type="file"')
@@ -279,7 +298,7 @@ class DrayerStream():
 		
 	
 	def setPrimaryServers(self, servers):
-		self.rawSetItem("primaryServers", msgpack.packb(servers, "drayer"))
+		self.rawSetItem("primaryServers", msgpack.packb(servers), "drayer")
 		
 	def getPrimaryServers(self):
 		#Returns a list of trusted primary servers.
@@ -296,6 +315,12 @@ class DrayerStream():
 		self.lastSynced = time.time()
 		
 		inserted = 0
+
+		if self.privkey and url.startswith("file://"):
+			url=url[len("file://"):]
+			self.importFiles(url, deletemissing=True)
+			#Mark as already used the url
+			url=None
 		
 		for chain in self.getSiblingChains():
 			if url:
@@ -914,6 +939,22 @@ class DrayerStream():
 		self.validateRecord(rId,chain)
 
 
+
+	def insertFile(self,n, f):
+		h = {"enc":"gzip","time":os.path.getmtime(f)}
+		i = io.BytesIO()
+
+		gf=gzip.GzipFile(fileobj=i,mode="w")
+
+		with open(f,mode="rb") as fd:
+			gf.write(fd.read())
+		gf.close()
+
+		h = msgpack.packb(h,use_bin_type=True)
+		d=struct.pack("<L", len(h))
+		d+=h+i.getvalue()
+		self.rawSetItem(n,d,"file")
+				
 	def __setitem__(self,k, v):
 		k,v=self.filterInsert(k,v)
 		self.rawSetItem(k,v, "obj")

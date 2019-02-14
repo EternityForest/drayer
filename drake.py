@@ -1,6 +1,7 @@
 import traceback,os
 import kivy
 import base64
+import webbrowser,urllib
 
 from kivy.config import Config
 Config.set('graphics', 'show_cursor', '1')
@@ -198,6 +199,59 @@ def FilePopup(x):
 
     popup.open()
 
+def ImportFilesPopup(x=None):
+    layout = BoxLayout(orientation='vertical')
+
+    hlp = Label(text="""Choose a directory to sync with.
+     All files in the directory will be imported, 
+     (dir/foo.txt will map to foo.txt, and all files in the stream that
+     are not in the folder will be deleted from the stream.
+     
+     Include an index.html to create a website.
+     """)
+    fch = FileChooserListView()
+    fch.path= os.getcwd()
+    fch.dirselect=True
+    filename = TextInput(hint_text="Foldername", multiline=False,size_hint=(1,0.1))
+
+    button = Button(text='Select', font_size=14, size_hint=(1,0.1))
+
+    def s(x,y):
+        try:
+            filename.text = os.path.basename(str(fch.selection[0]))
+        except:
+            filename.text =''
+    fch.bind(selection=s)
+    n = []
+
+    def f(j):
+        try:
+            fn = os.path.join(fch.path, filename.text)
+            if fn:
+                if os.path.isdir(fn):
+                    db.importFiles(fn, True)
+                else:
+                    presentError("Not a directory")
+            else:
+                presentError("Nothing selected!s")
+        except:
+            presentError(traceback.format_exc())
+        popup.dismiss()
+
+    layout.add_widget(hlp)
+    layout.add_widget(fch)
+    layout.add_widget(filename)
+
+    layout.add_widget(button)
+    
+    popup = Popup(title='Open or Create a Stream', content=layout, size_hint=(None, None), size=(600, 400))
+
+    button.bind(on_press=f)
+
+    popup.open()
+
+
+
 def ConfirmPopup(x, cb):
     layout = BoxLayout(orientation='vertical')
     
@@ -267,14 +321,22 @@ class MyApp(App):
 
         c1 = BoxLayout(orientation='vertical')
         c2 = BoxLayout(orientation='vertical')
-        sel = Button(text='Select a File', font_size=14, size_hint=(0.3,1))
-        showpubkey = Button(text='Show the pubkey', font_size=14, size_hint=(0.3,1))
-        sync = Button(text='Sync!', font_size=14, size_hint=(0.3,1))
 
+        bwid = 1/5.0
+        sel = Button(text='Select a File', font_size=14, size_hint=(bwid,1))
+        showpubkey = Button(text='Show the pubkey', font_size=14, size_hint=(bwid,1))
+        sync = Button(text='Sync!', font_size=14, size_hint=(bwid,1))
+
+        brows = Button(text='Web Browser', font_size=14, size_hint=(bwid,1))
+        imfils = Button(text='Import Folder', font_size=14, size_hint=(bwid,1))
 
         buttonbar.add_widget(showpubkey)
         buttonbar.add_widget(sel)
         buttonbar.add_widget(sync)
+        buttonbar.add_widget(brows)
+        buttonbar.add_widget(imfils)
+
+
 
         layout.add_widget(buttonbar)
         layout.add_widget(body)
@@ -382,11 +444,25 @@ class MyApp(App):
                db.sync()
             else:
                 presentError("No stream loaded!")  
+        def imfilscb(inst):
+            if db:
+               ImportFilesPopup()
+            else:
+                presentError("No stream loaded!")
+
+        def wbcb(inst):
+            webbrowser.open("http://localhost:"+str(drayer.http_port)+"/webAccess/"+
+            urllib.parse.quote_plus(base64.b64encode(db.pubkey).decode("utf8"))+"/"+"index.html")
+
+        
         sync.bind(on_press=sf)    
         showpubkey.bind(on_press=spk)
         submit.bind(on_press=post)
         sel.bind(on_press=FilePopup)
-        
+
+        brows.bind(on_press=wbcb)
+        imfils.bind(on_press=imfilscb)
+
         return layout
 
 
