@@ -1,17 +1,6 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
-"""
-ZetCode PyQt5 tutorial 
-
-In this example, we create a simple
-window in PyQt5.
-
-Author: Jan Bodnar
-Website: zetcode.com 
-Last edited: August 2017
-"""
-
 import sys
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
@@ -20,6 +9,28 @@ from PyQt5.QtGui import *
 
 import drayer, sys, os,time
 import rv
+
+
+dracoStyle="""
+    QWidget{
+        background-color: rgb(220,240,200);
+        border-color: rgb(89,60,7);
+        border-width: 3px;
+        selection-background-color: rgb(200,150,120);
+        selection-color: rgb(255,255,230);
+
+
+    }
+    QTextEdit,QLineEdit,QListWidget
+    {
+        background-color: rgb(240,255,230);
+    }
+    QPushButton
+    {
+        background-color: rgb(200,150,120)
+    }
+
+"""
 
 db = None
 
@@ -61,6 +72,7 @@ def getOneSocialPost(key,stream):
 
 
 
+
 class DrayerRefresher(drayer.DrayerStream):
     def onChange(self, op, x,y,z):
         self.parent.onChange()
@@ -79,10 +91,19 @@ class DrayerStreamTab(QWidget):
         self.titleToKey = {}
         self.reloadAll()
 
+    def onChange(self):
+        self.reloadAll()
+
     def reloadAll(self):
         self.reloadList()
 
     def reloadList(self):
+        self.streamContents.clear()
+
+        x = QListWidgetItem()
+        x.k="newpost"
+        x.setText("New Post")
+        self.streamContents.addItem(x)
         for i in getPublicSocialposts(self.stream):
             k=i["key"].split(":",1)
             t = 12345
@@ -98,7 +119,16 @@ class DrayerStreamTab(QWidget):
             x.setText(title)
             self.streamContents.addItem(x)
 
-    
+    def updatePost(self,*args):
+
+        if self.selectedPost=="newpost":
+                self.stream.rawSetItem(str(time.time())+":"+self.textbox.toPlainText(), self.textbox.text().encode("utf8"),"publicSocialPost")
+                self.titlebox.setText('')
+                self.textbox.setText('')
+        else:
+            self.stream.rawSetItem(self.selectedPost, self.textbox.toPlainText().encode("utf8"),"publicSocialPost")
+            self.reloadList()
+
     def _leftColumn(self):
         lw = QWidget()
         l = QVBoxLayout()
@@ -112,13 +142,20 @@ class DrayerStreamTab(QWidget):
 
         self.updateButton = QPushButton("Update")
         l.addWidget(self.updateButton)
+
+        self.updateButton.clicked.connect(self.updatePost)
         return lw
 
     def _onSelectPosting(self,*args):
         try:
             s = self.streamContents.selectedItems()[0].k
-            p = getOneSocialPost(s, self.stream)
-            self.textbox.setText(p[2].decode("utf8"))
+            if s=="newpost":
+                self.titlebox.setText('')
+                self.textbox.setText('')
+            else:
+                self.selectedPost= s
+                p = getOneSocialPost(s, self.stream)
+                self.textbox.setText(p[2].decode("utf8"))
         except:
             errorWindow()
 
@@ -135,20 +172,31 @@ class DrayerStreamTab(QWidget):
 
 class Window(QMainWindow):
 
+    def loadWizard(self):
+        fn = QFileDialog.getOpenFileName(self,"Select stream", os.getcwd(), "Streams (*.drayer *.stream)")
+        self.tabs.addTab(DrayerStreamTab(fn[0]),os.path.basename(fn[0]))
+
+
+    def createWizard(self):
+        pk = QInputDialog.getText(self, "Enter Public Key of the Stream","Leave blank to create a new stream with a new keypair in publish mode" )
+        fn = QFileDialog.getSaveFileName(self,"Select stream", os.getcwd(), "Streams (*.drayer *.stream)")
+        self.tabs.addTab(DrayerStreamTab(fn[0],pk),os.path.basename(fn[0]))
+
     def __init__(self):
         super(Window, self).__init__()
         self.setGeometry(50, 50, 500, 300)
-        self.setWindowTitle("PyQT tuts!")
-        self.setWindowIcon(QIcon('pythonlogo.png'))
+        self.setWindowTitle("Drake")
+        self.setWindowIcon(QIcon('swamp_dragon_new.png'))
 
-        extractAction = QAction("&GET TO THE CHOPPAH!!!", self)
-        extractAction.setShortcut("Ctrl+Q")
-        extractAction.setStatusTip('Leave The App')
-       # extractAction.triggered.connect(self.close_application)
+        loadAction = QAction("&Load stream", self)
+        loadAction.setStatusTip('Load an existing streamfile')
+        loadAction.triggered.connect(self.loadWizard)
+
+
 
         mainMenu = self.menuBar()
         fileMenu = mainMenu.addMenu('&File')
-        fileMenu.addAction(extractAction)
+        fileMenu.addAction(loadAction)
         
     
         self.tabs = QTabWidget()
@@ -157,6 +205,8 @@ class Window(QMainWindow):
 
 def run():
     app = QApplication(sys.argv)
+    app.setStyleSheet(dracoStyle)
+
     GUI = Window()
     GUI.show()
     sys.exit(app.exec_())

@@ -66,11 +66,11 @@ class DrayerWebServer(object):
 		return _allStreams[streampk].rawGetItemByKey(key, type)	
 
 	@cherrypy.expose
-	def webAccess(self, streampk, key):
+	def webAccess(self, streampk, *key):
 		streampk=decode_base64(streampk)
 		if not len(streampk)==32:
 			raise ValueError("PK must be 32 bytes")
-
+		key = "/".join(key)
 		#cherrypy.response.headers['Content-Type']="application/octet-stream"
 		f = _allStreams[streampk].rawGetItemByKey(key, "file")
 		l = struct.unpack("<L",f[:4])[0]
