@@ -51,9 +51,16 @@ Newly created blocks form a linked list of id's and prev pointers. However we al
 
 An advantage of the overshoot metric is that deleting a block never causes deletion of another block, so we can safely remove old blocks in partial mirrors.
 
+
 To delete a block, we modify the block in front(We cannot delete the most recent in the ID chain), to point to the block behind it. This requires the "silent patch" to the prevchange pointer of the block ahead of the one being modified to point to the one before the one being deleted, thus cutting them out of both chains.
 
+There requires patching the block in front of the deleted one to make the mchain
+work, and also patching the one in front of X in the modified chain, where X is the one in front of the block to be deleted in the ID chain.
 
+It may happen that the block in front of X actually is the block we want to delete,
+in which case we patch the one in front of that one.
+
+The general rule for resolving edge cases is that the mchain must be a linked list all the way back to zero, and anything that points to something nonexistant must be patched.
 
 
 The reason we must have two chains is that if we had only the modified chain, we could not delete things.

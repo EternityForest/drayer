@@ -861,11 +861,19 @@ class DrayerStream():
 			#If the record in front of the one we're about to
 			#Modify needs to be patched to point at the one behind
 			#the one we're deleting, to keep the mchain in order
+
+			#But, it could happen that the one in front of that one,
+			#IS the record we want to delete...
 			needsPatching = self.getNextModifiedRecord(n["modified"])
 
+			#We don't need to patch it if we're going to delete in first
+			if needsPatching and needsPatching['id']==torm['id']:
+				#Instead, we need to patch the one in front of it
+				needsPatching = self.getNextModifiedRecord(needsPatching["modified"])
 
 			#If the record in front of the one we're about to
-			#delete may also need patching
+			#delete may also need patching. Iyt likely will,
+			#Unless it's the same as another record we are going to patch.
 			needsPatching2 = self.getNextModifiedRecord(torm["modified"])
 
 			#Same record, only patch
