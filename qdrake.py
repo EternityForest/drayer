@@ -84,11 +84,47 @@ class DrayerRefresher(QObject, drayer.DrayerStream):
     def onChange(self, op, x,y,z):
         self.ch.emit()
 
+import socket
+#https://stackoverflow.com/questions/166506/finding-local-ip-addresses-using-pythons-stdlib
+def get_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # doesn't even have to be reachable
+        s.connect(('10.255.255.255', 1))
+        IP = s.getsockname()[0]
+    except:
+        IP = '127.0.0.1'
+    finally:
+        s.close()
+    return IP
+
 class DrayerStreamTab(QWidget):
+
+    def url(self,domain="localhost"):
+        return ("http://"+ domain+":"+str(drayer.http_port)+"/webAccess/"+
+        urllib.parse.quote_plus(base64.b64encode(self.stream.pubkey).decode("utf8"))+"/"+"index.html")
+
+    def showQR(self):
+        from PIL.ImageQt import ImageQt
+        import qrcode
+     
+        laddr = str(get_ip())
+        qim = ImageQt(qrcode.make(self.url(laddr)))
+        pix = QPixmap.fromImage(qim)
+
+        d = QDialog(self)
+        l=QLabel(d)
+        l.setFixedSize(480,480)
+
+        l.setPixmap(pix)
+        d.adjustSize()
+        d.show() 
+
     def __init__(self,fn,pk=None):
         QWidget.__init__(self)
         self.stream = DrayerRefresher(fn,pk)
         self.stream.ch.connect(self.onChange)
+
 
         self.lo= QHBoxLayout()
         self.setLayout(self.lo)
@@ -187,15 +223,21 @@ class DrayerStreamTab(QWidget):
                 self.selectedPost= s
                 p = getOneSocialPost(s, self.stream)
                 self.textbox.setText(p[2].decode("utf8"))
+                self.titlebox.setText(p[0])
                 self.delbt.setDisabled(False)
 
         except:
             errorWindow()
 
+    def syncButtonF(self):
+        self.stream.sync()
+
     def _rightColumn(self):
         lw = QWidget()
         l = QVBoxLayout()
         lw.setLayout(l)
+
+        self.syncButton = QPushButton("Sync!")
 
         self.streamContents = QListWidget()
         self.streamContents.itemSelectionChanged.connect(self._onSelectPosting)
@@ -203,6 +245,8 @@ class DrayerStreamTab(QWidget):
         self.delbt= QPushButton("Delete Selected")
         self.delbt.clicked.connect(self.deletePrompt)
         self.delbt.setDisabled(True)
+        self.syncButton.clicked.connect(self.syncButtonF)
+        l.addWidget(self.syncButton)
         l.addWidget(self.streamContents)
         l.addWidget(self.delbt)
 
@@ -219,6 +263,11 @@ class Window(QMainWindow):
     def deletePrompt():
         self.tabs.currentWidget().deletePrompt()
 
+    def qr(self):
+        self.tabs.currentWidget().showQR()
+
+
+
     def createWizard(self):
         pk = QInputDialog.getText(self, "Enter Public Key of the Stream","Leave blank to create a new stream with a new keypair in publish mode" )
 
@@ -232,10 +281,9 @@ class Window(QMainWindow):
 
     def runBrowser(self):
         db = self.tabs.currentWidget().stream
-        webbrowser.open("http://localhost:"+str(drayer.http_port)+"/webAccess/"+
-        urllib.parse.quote_plus(base64.b64encode(db.pubkey).decode("utf8"))+"/"+"index.html")
-
-        
+        webbrowser.open(db.url())
+    
+    
     def __init__(self):
         super(Window, self).__init__()
         self.setGeometry(50, 50, 500, 300)
@@ -253,6 +301,10 @@ class Window(QMainWindow):
         browserAction.setStatusTip("Opens the stream's index.html")
         browserAction.triggered.connect(self.runBrowser)
 
+        qrAction = QAction("&QR For mobile browser", self)
+        qrAction.triggered.connect(self.qr)
+
+
         importAction = QAction("&Sync with folder", self)
         importAction.setStatusTip("Add files in folder to stream, remove files not in folder")
         importAction.triggered.connect(self.syncFilesPrompt)
@@ -266,10 +318,10 @@ class Window(QMainWindow):
 
         actionMenu.addAction(browserAction)
         actionMenu.addAction(importAction)
+        actionMenu.addAction(qrAction)
     
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
-        self.tabs.addTab(DrayerStreamTab("/home/daniel/drayer/fooo.stream"),"opopopo")
 
 def run():
     app = QApplication(sys.argv)

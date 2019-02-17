@@ -316,7 +316,7 @@ class DrayerStream():
 		
 		inserted = 0
 
-		if self.privkey and url.startswith("file://"):
+		if self.privkey and url and url.startswith("file://"):
 			url=url[len("file://"):]
 			self.importFiles(url, deletemissing=True)
 			#Mark as already used the url

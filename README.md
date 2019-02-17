@@ -17,6 +17,33 @@ All records have embedded type information as a db column, allowing fast applica
 Absolutely everything subject to change(Just like our fully mutable streams!). Project is a few days old and
 is not even pre-alpha.
 
+## Drake
+
+Drake is both a GUI app and an application layer. Note that at the moment,
+the GUI apps here work but ARE NOT PRIVATE if you use them while connected to untrusted
+networks.
+
+Qdrake lets you make publicSocialPosts, clone streams, read posts in cloned streams, sync streams, add files to the stream, and with `qrcode` installed lets you show a QR code for a mibile browser on the same LAN to view an `index.html` included in the stream.
+
+
+
+### Why it isn't private
+
+They enable local network serving of any streams you load. 
+
+There may be an option to disable this, but in general
+the primary design intent of Drayer is as an unencrypted data structure
+with encryption provided by either the transport layer or the application.
+
+You should not put anything private at all into a Drayer stream, unless you
+either encrypt it yoursel of only use it with apps that do not share things publically.
+
+This might change, and it would not be too hard to create an optional encrypted
+version of the UDP discovery that is unreadable by anyone who doesn't already
+know a stream's PK.
+
+For now there are many used for fully authenticated cleartext communication, and the
+privacy is no worse than many, many other P2P protocols that share your IP and what you're downloading with the world.
 
 ## Using it!
 
