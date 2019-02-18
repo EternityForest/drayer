@@ -250,7 +250,7 @@ class DrayerStream():
         self.pubkey = None
         self.privkey = None
         self.fn = fn
-        
+        self.lock=threading.Lock()
         self.noServe = noServe
         
         self.lastSynced = 0
@@ -266,7 +266,7 @@ class DrayerStream():
         self.tloc = threading.local()
         
         if fn:
-            self.conn=sqlite3.connect(fn)
+            self.conn=sqlite3.connect(fn,isolation_level="EXCLUSIVE")
             self.conn.row_factory = sqlite3.Row
             
             c=self.conn.cursor()
@@ -286,7 +286,7 @@ class DrayerStream():
             #chain: If empty, it's the default chain. But we can also store "sibling chains" in here. We
             #would list them by the public key.
              
-            c.execute("CREATE TABLE IF NOT EXISTS record (id integer, type text, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob, chain blob, UNIQUE(id,chain,modified));")
+            c.execute("CREATE TABLE IF NOT EXISTS record (id integer, type text, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob, chain blob, UNIQUE(chain,modified),UNIQUE(chain,prevchange));")
 
             self.pubkey=pubkey
             pk = self.getAttr("PublicKey")
@@ -501,12 +501,13 @@ class DrayerStream():
                     raise ValueError("Invalid len")
                 if c==self.pubkey:
                     c=b''
-                with self.getConn():
-                    #We can compute this ourselfves but we validate if it's given
-                    h = None
-                    if b'hash' in i:
-                        h=i[b'hash']
-                    self._insertRecord(i[b"id"],i[b'type'].decode('utf8'),i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],c,url,hash=h)
+                with self.lock:
+                    with self.getConn():
+                        #We can compute this ourselfves but we validate if it's given
+                        h = None
+                        if b'hash' in i:
+                            h=i[b'hash']
+                        self._insertRecord(i[b"id"],i[b'type'].decode('utf8'),i[b"key"].decode("utf8"),i[b"val"], i[b"mod"], i[b"prev"], i[b"prevch"],i[b"sig"],c,url,hash=h)
             except:
                 print(traceback.format_exc())
                 return inserted
@@ -711,7 +712,8 @@ class DrayerStream():
             #And the mod tome wouldn't stay the same for anything
             #but a patch
             if not r[b'prevch']< beingReplaced['prevchange']:
-                raise RuntimeError("Sanity check fail")
+                print(beingReplaced['key'])
+                raise RuntimeError("Sanity check fail",r[b'prevch'], beingReplaced['prevchange'])
 
             # I believe there is no reason ever to replace a block
             # with an older block
@@ -733,7 +735,9 @@ class DrayerStream():
         #Quickly garbage collect any values that this change obsoletes
         if not newp==oldp:
             self.getConn().execute("DELETE FROM record WHERE id<=? AND id>? AND chain=?",(oldp,newp,chain))
-        
+        #Modified chain GC
+        self.getConn().execute("DELETE FROM record WHERE modified>? AND modified<? AND chain=?",(r[b'prevch'],r[b'mod'],chain))
+
 
         self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(r[b'id'],chain))
         self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?,?)",(r[b'id'],r[b'type'].decode("utf8"),r[b'key'].decode("utf8"),r[b'val'],r[b'hash'],r[b'mod'],r[b'prev'],r[b'prevch'], r[b'sig'],chain))
@@ -814,11 +818,14 @@ class DrayerStream():
                 raise ValueError("New records must connect to an existing value in the mchain, or must connect to the back of the chain. pointer was:"+str(prevchanged))
                 
 
+        if not prevchanged==self.getModifiedTip(chain):
             #Actually delete anything it patches out in the mchain
-            self.getConn().execute("DELETE FROM record WHERE modified<? ",(prevchanged,))
+            self.getConn().execute("DELETE FROM record WHERE modified>? ",(prevchanged,))
             #Should do better logic here, but we don't really know what's deleted and what's
             #replaced with something later on I don't think
             doUnknownOnChange = True
+        
+        
 
         
         tip = self.getChainTip(chain)
@@ -859,7 +866,11 @@ class DrayerStream():
         didModify = False
         unpatchedChain = False
         if oldRecord:		
-            didModify=True		
+            didModify=True
+
+            #We have to do the chain fix after we actually delete the old record
+            #Otherwise we couldn't do DB constraints
+            doChainFix=None
             #The record in front that we need to patch
             n = self.getNextModifiedRecord(oldRecord["modified"],chain)
             if n:
@@ -867,11 +878,11 @@ class DrayerStream():
                 #Since the record we are replacing won't be there, we need to find
                 #What really points at that record(Or the one before it, etc, if it's gone)
                 p = oldRecord["prevchange"]	
-
                 #We have the private key, why not do the patch ourselves?
                 if self.privkey:
-                    #Explicitly say what to point at
-                    self._fixPrevChangePointer(n['id'],chain,p)
+                    def doChainFix():
+                        #Explicitly say what to point at
+                        self._fixPrevChangePointer(n['id'],chain,p)
 
                 elif requestURL:
                     #We do not have the private key, we need to request more data
@@ -880,7 +891,8 @@ class DrayerStream():
                     #The oldrecord parameter we pass is thenext record, because the next
                     #record is the one we need to replace to mess with this record.
                     try:
-                        self._requestChainRepair(requestURL, p, n, chain)
+                        def doChainFix():
+                            self._requestChainRepair(requestURL, p, n, chain)
                     except:
                         print(traceback.format_exc())
                         logging.exception("Could not get chain repair data")
@@ -897,7 +909,8 @@ class DrayerStream():
                     self.getConn().execute('UPDATE record SET value=? WHERE id=? AND chain=?',(b"", id,chain))
                 else:
                     raise RuntimeError("That record would break the chain. To insert it you must supply a URL that can provide repair data, or allow keeping obsolete records.")
-
+            if doChainFix:
+                doChainFix()
         self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?,?)",(id,type,key,value,h,modified,prev,prevchanged, signature,chain))
         self.validateRecord(id,chain)
         try:
@@ -925,74 +938,75 @@ class DrayerStream():
 
     def rawDelete(self,k,t):
         id = self._getIdForKey(k,t)
-        with self.getConn():
-            if not id:
-                raise KeyError(k)
+        with self.lock:
+            with self.getConn():
+                if not id:
+                    raise KeyError(k)
+                    
+                #The record that references us in the actual chain
+                #That we are going to patch to not do that
+                n = self._getNextRecord(id)
                 
-            #The record that references us in the actual chain
-            #That we are going to patch to not do that
-            n = self._getNextRecord(id)
-            
-            if not n:
-                if self._hasRecordBeenDeleted(id):
-                    raise RuntimeError("Record already deleted")
-                #The block tip cant be GCed so we can't delete it
-                raise RuntimeError("Currently we cannot delete the very most recently added item, but you can add another and try again.")
+                if not n:
+                    if self._hasRecordBeenDeleted(id):
+                        raise RuntimeError("Record already deleted")
+                    #The block tip cant be GCed so we can't delete it
+                    raise RuntimeError("Currently we cannot delete the very most recently added item, but you can add another and try again.")
 
-            p = self._getPrev(id)
-            mtip = self.getModifiedTip()
-            
-            torm = self.getRecordById(id)
-            
-            #If the record in front of the one we're about to
-            #Modify needs to be patched to point at the one behind
-            #the one we're deleting, to keep the mchain in order
+                p = self._getPrev(id)
+                mtip = self.getModifiedTip()
+                
+                torm = self.getRecordById(id)
+                
+                #If the record in front of the one we're about to
+                #Modify needs to be patched to point at the one behind
+                #the one we're deleting, to keep the mchain in order
 
-            #But, it could happen that the one in front of that one,
-            #IS the record we want to delete...
-            needsPatching = self.getNextModifiedRecord(n["modified"])
+                #But, it could happen that the one in front of that one,
+                #IS the record we want to delete...
+                needsPatching = self.getNextModifiedRecord(n["modified"])
 
-            #We don't need to patch it if we're going to delete in first
-            if needsPatching and needsPatching['id']==torm['id']:
-                #Instead, we need to patch the one in front of it
-                needsPatching = self.getNextModifiedRecord(needsPatching["modified"])
+                #We don't need to patch it if we're going to delete in first
+                if needsPatching and needsPatching['id']==torm['id']:
+                    #Instead, we need to patch the one in front of it
+                    needsPatching = self.getNextModifiedRecord(needsPatching["modified"])
 
-            #If the record in front of the one we're about to
-            #delete may also need patching. Iyt likely will,
-            #Unless it's the same as another record we are going to patch.
-            needsPatching2 = self.getNextModifiedRecord(torm["modified"])
+                #If the record in front of the one we're about to
+                #delete may also need patching. Iyt likely will,
+                #Unless it's the same as another record we are going to patch.
+                needsPatching2 = self.getNextModifiedRecord(torm["modified"])
 
-            #Same record, only patch
-            if needsPatching2==needsPatching:
-                needsPatching=None
+                #Same record, only patch
+                if needsPatching2==needsPatching:
+                    needsPatching=None
 
-            #Copy IDs, records may change
-            if needsPatching:
-                needsPatching= needsPatching["id"]
-            if needsPatching2:
-                needsPatching2=needsPatching2['id']
-            #Can't connect to the one we're about to delete either
-            if mtip== torm['modified']:
-                x = self.getRecordByModificationTime(torm["prevchange"])
-                if not x:
-                    if not torm["prevchange"]==0:
-                        #There would be nothing for the record to connect to!
-                        raise RuntimeError("Can't remove that record")
-                mtip=torm["prevchange"]
-            
-            
-            #Make a new record for the one right in front of it.
-            #insertRecord will handle patching the one in front of *that*?
-            t = int(time.time()*1000000)
-            sig=self.makeSignature(n["id"],n['type'],n["key"], n["hash"],t,p,mtip)
-            self._insertRecord(n["id"],n['type'],n["key"],n["value"], t,p, mtip,sig,hash=n['hash'])
+                #Copy IDs, records may change
+                if needsPatching:
+                    needsPatching= needsPatching["id"]
+                if needsPatching2:
+                    needsPatching2=needsPatching2['id']
+                #Can't connect to the one we're about to delete either
+                if mtip== torm['modified']:
+                    x = self.getRecordByModificationTime(torm["prevchange"])
+                    if not x:
+                        if not torm["prevchange"]==0:
+                            #There would be nothing for the record to connect to!
+                            raise RuntimeError("Can't remove that record")
+                    mtip=torm["prevchange"]
+                
+                
+                #Make a new record for the one right in front of it.
+                #insertRecord will handle patching the one in front of *that*?
+                t = int(time.time()*1000000)
+                sig=self.makeSignature(n["id"],n['type'],n["key"], n["hash"],t,p,mtip)
+                self._insertRecord(n["id"],n['type'],n["key"],n["value"], t,p, mtip,sig,hash=n['hash'])
 
-            if needsPatching:
-                self._fixPrevChangePointer(needsPatching)
+                if needsPatching:
+                    self._fixPrevChangePointer(needsPatching)
 
-            #There may be 2 different records we must patch
-            if needsPatching2:
-                self._fixPrevChangePointer(needsPatching2)
+                #There may be 2 different records we must patch
+                if needsPatching2:
+                    self._fixPrevChangePointer(needsPatching2)
         self.broadcastUpdate()
     
             
@@ -1000,23 +1014,25 @@ class DrayerStream():
         n=self.getRecordById(id,chain)
         if n==None:
             raise RuntimeError(str(id))
-        c = self.getConn().cursor()
-        #If the chain is otherwise consistent, the most recent record before this one is the one
-        #We should be pointing at
-        c.execute("SELECT modified FROM record WHERE modified<? ORDER BY modified DESC",(n["modified"],))
-        
+      
         if p is None:
+            c = self.getConn().cursor()
+            #If the chain is otherwise consistent, the most recent record before this one is the one
+            #We should be pointing at
+            c.execute("SELECT modified FROM record WHERE modified<? ORDER BY modified DESC",(n["modified"],))
+            
             #If there isn't a record before us, we're the first and we 
             #point at zero
             x = c.fetchone()
             if not x:
-                x = None
+                x = 0
             else:
                 x = x[0]
 
             if chain==self.pubkey:
                 chain=b''
             p=x
+
 
         rId=n['id']
         rKey=n['key']
@@ -1028,8 +1044,14 @@ class DrayerStream():
         rPrevch = p
 
         sig=self.makeSignature(rId,rType, rKey, rHash,rMod,rPrev,rPrevch,chain)
-        self.getConn().execute("DELETE FROM record WHERE (id=? AND chain=?)",(rId, chain))
-        self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?,?)",(rId,rType,rKey,rValue,rHash,rMod,rPrev, rPrevch,sig,chain))
+        try:
+           # self.getConn().execute("DELETE FROM record WHERE (id=? AND chain=?)",(rId, chain))
+            #self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?,?)",(rId,rType,rKey,rValue,rHash,rMod,rPrev, rPrevch,sig,chain))
+            self.getConn().execute("UPDATE record SET prevchange=?,signature=? WHERE id=? AND chain=?",(rPrevch,sig, rId,chain))
+        
+        except:
+            print(rId, rKey,rValue,rPrevch)
+            raise
         self.validateRecord(rId,chain)
 
 
@@ -1054,32 +1076,33 @@ class DrayerStream():
         self.rawSetItem(k,v, "obj")
 
     def rawSetItem(self,k, v,type):
-        with self.getConn():
-            id = self._getIdForKey(k, type)
-            
-            if not id:
-                id= self.getChainTip()+1
-                prev = self.getChainTip()
-            else:
-                prev= self._getPrev(id)
+        with self.lock:
+            with self.getConn():
+                id = self._getIdForKey(k, type)
                 
-            mtime = int(time.time()*1000*1000)
-            prevMtime = self.getModifiedTip()
-            if self.getRecordById(id):
-                if self.getRecordById(id)['modified']==prevMtime:
-                    #WE cant connect to the old version of ourselves
-                    #so we connect to the record before that and let GC handle it
-                    prevMtime = self.getModifiedTipRecord()["prevchange"]
+                if not id:
+                    id= self.getChainTip()+1
+                    prev = self.getChainTip()
+                else:
+                    prev= self._getPrev(id)
+                    
+                mtime = int(time.time()*1000*1000)
+                prevMtime = self.getModifiedTip()
+                if self.getRecordById(id):
+                    if self.getRecordById(id)['modified']==prevMtime:
+                        #WE cant connect to the old version of ourselves
+                        #so we connect to the record before that and let GC handle it
+                        prevMtime = self.getModifiedTipRecord()["prevchange"]
 
-            h = drayer_hash(v)
+                h = drayer_hash(v)
 
-            sig = self.makeSignature(id,type,k,h,mtime,prev,prevMtime)
+                sig = self.makeSignature(id,type,k,h,mtime,prev,prevMtime)
 
-            self._insertRecord(id,type,k,v,mtime,prev,prevMtime,sig,hash=h)
-            self.validateRecord(id)
+                self._insertRecord(id,type,k,v,mtime,prev,prevMtime,sig,hash=h)
+                self.validateRecord(id)
 
-            self.broadcastUpdate()
-    
+                self.broadcastUpdate()
+        
     def __getitem__(self,k):
         return self.filterGet(self.rawGetItemByKey(k,"obj"))
 
@@ -1341,10 +1364,11 @@ class DrayerStream():
             return x[0]
             
     def setAttr(self,k,v):
-        with self.getConn():
-            self.getConn().execute("DELETE FROM attr WHERE key=?",(k,))
-            self.getConn().execute("INSERT INTO attr VALUES (?,?)",(k,v))
-         
+        with self.lock:
+            with self.getConn():
+                self.getConn().execute("DELETE FROM attr WHERE key=?",(k,))
+                self.getConn().execute("INSERT INTO attr VALUES (?,?)",(k,v))
+            
 
 
 
