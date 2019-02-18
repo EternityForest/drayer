@@ -661,9 +661,9 @@ class DrayerStream():
         """
         r = requests.get(
             url+
-            "crdr/"+
+        
             urllib.parse.quote_plus(b64encode(chain or self.pubkey).decode("utf8"))+
-            "/"+str(pdest)
+            "/crdr/"+str(pdest)
             ,stream=True)
         r.raise_for_status()
         r=r.raw.read(100*1000*1000)
@@ -882,6 +882,7 @@ class DrayerStream():
                     try:
                         self._requestChainRepair(requestURL, p, n, chain)
                     except:
+                        print(traceback.format_exc())
                         logging.exception("Could not get chain repair data")
                         unpatchedChain = True
                 else:
