@@ -175,27 +175,29 @@ class DrayerWebServer(object):
         
         """
         streampk=decode_base64(streampk)
-        if not len(streampk)==32:
-            raise ValueError("PK must be 32 bytes")
+        st = _allStreams[streampk]
+        with st.lock:
+            if not len(streampk)==32:
+                raise ValueError("PK must be 32 bytes")
 
-        cherrypy.response.headers['Content-Type']="application/octet-stream"
-        old=int(old)
-        i = _allStreams[streampk].getChainRepair(old, streampk)
-        x=({
-            "hash":i["hash"],
-            "type":i["type"],
-            "key":i["key"],
-            "val":i["value"],
-            "id": i["id"],
-            "sig":i["signature"],
-            "prev":i["prev"],
-            "prevch":i["prevchange"],
-            "mod":i["modified"],
-            "chain":streampk
-        })
-    
-        x= msgpack.packb(x)
-        return(x)
+            cherrypy.response.headers['Content-Type']="application/octet-stream"
+            old=int(old)
+            i = st.getChainRepair(old, streampk)
+            x=({
+                "hash":i["hash"],
+                "type":i["type"],
+                "key":i["key"],
+                "val":i["value"],
+                "id": i["id"],
+                "sig":i["signature"],
+                "prev":i["prev"],
+                "prevch":i["prevchange"],
+                "mod":i["modified"],
+                "chain":streampk
+            })
+        
+            x= msgpack.packb(x)
+            return(x)
        
     @cherrypy.expose
     def newRecords(self, t,streampk):
@@ -207,31 +209,32 @@ class DrayerWebServer(object):
         cherrypy.response.headers['Content-Type']="application/octet-stream"
         t = int(t)
         st = _allStreams[streampk]
-        with st.getConn():
-            c = st.getRecordsSince(t,streampk)
-            limit = 100
-            l = []
-            for i in c:
-                st.validateRecord(i["id"],i["chain"])
-                if limit<1:
-                    break
-                    limit-=1
-                l.append({
-                    "hash":i["hash"],
-                    "type":i["type"],
-                    "key":i["key"],
-                    "val":i["value"],
-                    "id": i["id"],
-                    "sig":i["signature"],
-                    "prev":i["prev"],
-                    "prevch":i["prevchange"],
-                    "mod":i["modified"],
-                    "chain": streampk
-                })
-        
-            x= msgpack.packb(l)
-            return(x)
+        with st.lock:
+            with st.getConn():
+                c = st.getRecordsSince(t,streampk)
+                limit = 100
+                l = []
+                for i in c:
+                    st.validateRecord(i["id"],i["chain"])
+                    if limit<1:
+                        break
+                        limit-=1
+                    l.append({
+                        "hash":i["hash"],
+                        "type":i["type"],
+                        "key":i["key"],
+                        "val":i["value"],
+                        "id": i["id"],
+                        "sig":i["signature"],
+                        "prev":i["prev"],
+                        "prevch":i["prevchange"],
+                        "mod":i["modified"],
+                        "chain": streampk
+                    })
             
+                x= msgpack.packb(l)
+                return(x)
+                
         
     
 
@@ -814,6 +817,7 @@ class DrayerStream():
             #Always allow the special case of the thing that's supposed to point at the very start,
             #Imaginary block 0.
             if prevchanged:
+                print(self.getModifiedTip(chain))
                 #And of course we have the exception for linking to the back
                 raise ValueError("New records must connect to an existing value in the mchain, or must connect to the back of the chain. pointer was:"+str(prevchanged))
                 
