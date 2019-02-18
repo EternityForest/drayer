@@ -110,7 +110,7 @@ class DrayerWebServer(object):
         db = _allStreams[streampk]
         
         c = db.getConn().cursor()
-        c.execute('SELECT * FROM record WHERE type=? AND modified >? AND modified<? ORDER BY id desc LIMIT 250',(type, kw.get("after",0)*1000000,kw.get("before",2**40)*1000000))
+        c.execute('SELECT * FROM record WHERE type=? AND modified >? AND modified<? ORDER BY id desc LIMIT 250',(type, kw.get("after",0),kw.get("before",2**62)))
 
         for i in c:
             x.append([i['key'],i['modified']])
@@ -131,10 +131,10 @@ class DrayerWebServer(object):
         db = _allStreams[streampk]
         
         c = db.getConn().cursor()
-        c.execute('SELECT * FROM record WHERE type=? AND modified>? AND modified<? ORDER BY modified desc LIMIT 250',(type, kw.get("after",0)*1000000,kw.get("before",2**40)*1000000))
+        c.execute('SELECT * FROM record WHERE type=? AND id>? AND id<? ORDER BY modified desc LIMIT 250',(type, kw.get("after",0),kw.get("before",2**60)))
 
         for i in c:
-            x.append([i['key'],i['modified']])
+            x.append([i['key'],i['id']])
         return json.dumps(x)
 
     
@@ -1034,7 +1034,7 @@ class DrayerStream():
 
 
     def insertFile(self,n, f):
-        h = {"enc":"gzip","time":os.path.getmtime(f)}
+        h = {"enc":"gzip","time":os.path.getmtime(f)*10**6}
         i = io.BytesIO()
 
         gf=gzip.GzipFile(fileobj=i,mode="w")

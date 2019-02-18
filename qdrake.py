@@ -132,13 +132,17 @@ class DrayerStreamTab(QWidget):
         w.setLayout(lo)
 
         l = QListWidget()
+        l.setMinimumSize(240,320)
         lo.addWidget(l)
-
+        c = 0
         for i in getFiles(self.stream):
+            c+=1
+            if c>10*1000:
+                raise RuntimeError("Too many files to show!")
             j = QListWidgetItem()
             j.setText(i["key"])
             l.addItem(j)
-
+        w.adjustSize()
         d.adjustSize()
         d.show() 
 
@@ -332,14 +336,14 @@ class Window(QMainWindow):
         self.setWindowIcon(QIcon('swamp_dragon_new.png'))
 
         loadAction = QAction("&Load stream", self)
-        loadAction.setStatusTip('Load an existing streamfile')
+        loadAction.setToolTip('Load an existing streamfile')
         loadAction.triggered.connect(self.loadWizard)
 
         createAction = QAction("&Create or Import a stream", self)
         createAction.triggered.connect(self.createWizard)
 
         browserAction = QAction("&View stream files in web browser", self)
-        browserAction.setStatusTip("Opens the stream's index.html")
+        browserAction.setToolTip("Opens the stream's index.html")
         browserAction.triggered.connect(self.runBrowser)
 
         qrAction = QAction("&QR For mobile browser", self)
@@ -352,8 +356,8 @@ class Window(QMainWindow):
         keyAction.triggered.connect(self.showPubkey)
 
 
-        importAction = QAction("&Sync with folder", self)
-        importAction.setStatusTip("Add files in folder to stream, remove files not in folder")
+        importAction = QAction("&Sync with folder(Add files in folder/delete files not in folder)", self)
+        importAction.setToolTip("Add files in folder to stream, remove files not in folder")
         importAction.triggered.connect(self.syncFilesPrompt)
 
         mainMenu = self.menuBar()

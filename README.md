@@ -155,6 +155,21 @@ The public key is kept base64 encoded in the attribute "PublicKey". Attributes a
 The private key, for writable records, is kept base64 encoded in STREAM_FN+".privatekey"
 
 
+## Including files in a stream
+
+We define a special type, "file", for storing files in the stream as you might in a .zip
+file. File data starts with a 4 byte header length and a messagepack header.
+
+As a higher-level application spec, the messagepack headers use the new separate string and bin types unlike lower level Drayer protocol APIs.
+
+The header must have 2 keys, enc, a string representing the encoding(must be "gzip" for now), and "time", the time in microseconds of the file's real modification date(Not it's containing stream record).
+
+The rest of the entry must simply be the compressed file data.
+
+
+The reason that gzip was chosen is that python has native support for it, and so do browsers.
+
+
 ## Discovery and Transport.
 
 Drayer doesn't try to ensure privacy at all. Think of it like IPFS or Bitcoin, where pseudonyms are public and encyrption is
@@ -171,9 +186,40 @@ Using HTTP means that a future javascript implementation is possible.
 ### HTTP Protocol
 
 Drayer servers are identified by a URL, and all these commands should be interpreted as the part of the URL that comes after
-the mount point,(If mounted at /, then you would say example.com/newRecords).
+the mount point,(If mounted at /, then you would say example.com/pubkey/newRecords).
 
-#### newRecords/<STREAM_PUBKEY_B64>/<TIMESTAMP>
+Note that these all start with the publlic key of the stream you want to acess.
+
+
+
+#### <STREAM_PUBKEY_B64>/newestRecordsJSON/type
+
+Gets up to 250 of the most recently created records of a certain type, as a list of [key,id] lists, in JSON.
+
+the url request params after and before, may be used
+to limit the results to a certain set of IDs. Both limits are not inclusive.
+
+
+
+#### <STREAM_PUBKEY_B64>/listRecordsJSON/type
+
+Gets up to 250 of the most recently modified records of a certain type, as a list of [key,time] lists, in JSON.
+
+the url request params after and before, may be used
+to limit the results to a certain set of times. Both limits are not inclusive.
+
+All times are in microseconds since the UNIX epoch.
+
+
+#### <STREAM_PUBKEY_B64>/webAccess/**
+
+Here ** denotes a file path. The file path will be used to look up the
+key in the stream that has the type "file", and it will be decoded(but not decompressed),
+and the raw data sent to the client with the appropriate content encoding variable set.
+
+This lets any node act as a simple static webserver.
+
+#### <STREAM_PUBKEY_B64>/newRecords/<TIMESTAMP>
 
 Returns a messagepack endcoded list of records, where each is a dict with the following keys. B64 encoding is not used.
 
