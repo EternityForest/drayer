@@ -19,6 +19,31 @@ def drayer_hash(d):
 		raise TypeError
 	return libnacl.crypto_generichash(d)
 
+def readPGP():
+	le,lo ={},{} 
+	pgpfn = os.path.join(os.path.split(__file__)[0],"pgplist.txt")
+	with open(pgpfn) as f:
+		l = f.read().split("\n")
+	for i in l:
+		i=i.strip()
+		h, e, o=i.split("\t")
+		lo[int(h,16)]=o
+		le[int(h,16)]=e
+	return le,lo
+
+pgp_even,pgp_odd = readPGP()
+
+def encodePGP(b):
+	c=0
+	o=[]
+	for i in b:
+		if not c%2:
+			o.append(pgp_even[i])
+		else:
+			o.append(pgp_odd[i])
+	return " ".join(o).lower()
+
+
 listensock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 listensock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 listensock.bind(("", MCAST_PORT))
@@ -244,6 +269,9 @@ class DrayerStream():
 
 			if noServe==False:
 				_allStreams[self.pubkey] = self
+	
+	def pgpFingerprint(self):
+		return encodePGP(self.pubkey[:24])
 	
 	def getConn(self):
 		try:

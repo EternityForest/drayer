@@ -57,6 +57,11 @@ def getPublicSocialposts(stream):
     c.execute('SELECT key,value FROM record WHERE type="publicSocialPost" ORDER BY id desc')
     return c
 
+def getFiles(stream):
+    c = stream.getConn().cursor()
+    c.execute('SELECT key,value FROM record WHERE type="file" ORDER BY key asc')
+    return c
+
 def errorWindow(e=None):
     jhj
 
@@ -117,6 +122,35 @@ class DrayerStreamTab(QWidget):
         l.setFixedSize(480,480)
 
         l.setPixmap(pix)
+        d.adjustSize()
+        d.show() 
+
+    def showFilesDialog(self):
+        d = QDialog(self)
+        w=QWidget(d)
+        lo=QVBoxLayout()
+        w.setLayout(lo)
+
+        l = QListWidget()
+        lo.addWidget(l)
+
+        for i in getFiles(self.stream):
+            j = QListWidgetItem()
+            j.setText(i["key"])
+            l.addItem(j)
+
+        d.adjustSize()
+        d.show() 
+
+    def showPubkey(self):
+
+        d = QDialog(self)
+        l=QTextEdit(d)
+    
+        l.setText("Filename:\r\n"+self.stream.fn+"\r\n\r\nPublic Key(Base64):\r\n"+
+            base64.b64encode(self.stream.pubkey).decode("utf8")+"\r\n\r\nPubkey(PGP encoded):\r\n"+self.stream.pgpFingerprint())
+        l.setFixedSize(480,240)
+        l.setReadOnly(True)
         d.adjustSize()
         d.show() 
 
@@ -266,7 +300,11 @@ class Window(QMainWindow):
     def qr(self):
         self.tabs.currentWidget().showQR()
 
-
+    def showFiles(self):
+        self.tabs.currentWidget().showFilesDialog()
+    
+    def showPubkey(self):
+        self.tabs.currentWidget().showPubkey()
 
     def createWizard(self):
         pk = QInputDialog.getText(self, "Enter Public Key of the Stream","Leave blank to create a new stream with a new keypair in publish mode" )
@@ -304,6 +342,12 @@ class Window(QMainWindow):
         qrAction = QAction("&QR For mobile browser", self)
         qrAction.triggered.connect(self.qr)
 
+        filesAction = QAction("&Show files in stream", self)
+        filesAction.triggered.connect(self.showFiles)
+
+        keyAction = QAction("&Show public key", self)
+        keyAction.triggered.connect(self.showPubkey)
+
 
         importAction = QAction("&Sync with folder", self)
         importAction.setStatusTip("Add files in folder to stream, remove files not in folder")
@@ -315,6 +359,8 @@ class Window(QMainWindow):
 
         fileMenu.addAction(loadAction)
         fileMenu.addAction(createAction)
+        fileMenu.addAction(filesAction)
+        fileMenu.addAction(keyAction)
 
         actionMenu.addAction(browserAction)
         actionMenu.addAction(importAction)
