@@ -43,7 +43,7 @@ rlfun = rl
 
 
 
-drayer.startServer()
+drayer_port = drayer.startServer()
 drayer.startLocalDiscovery()
 
 import atexit
@@ -106,8 +106,8 @@ def get_ip():
 class DrayerStreamTab(QWidget):
 
     def url(self,domain="localhost"):
-        return ("http://"+ domain+":"+str(drayer.http_port)+"/webAccess/"+
-        urllib.parse.quote_plus(base64.b64encode(self.stream.pubkey).decode("utf8"))+"/"+"index.html")
+        return ("http://"+ domain+":"+str(drayer_port)+"/"+
+        urllib.parse.quote_plus(base64.b64encode(self.stream.pubkey).decode("utf8"))+"/webAccess/"+"index.html")
 
     def showQR(self):
         from PIL.ImageQt import ImageQt
@@ -319,9 +319,9 @@ class Window(QMainWindow):
 
     def runBrowser(self):
         db = self.tabs.currentWidget().stream
-        url = ("http://localhost:"+str(drayer.http_port)+"/webAccess/"+
-            urllib.parse.quote_plus(base64.b64encode(db.pubkey).decode("utf8"))+"/"+"index.html")
-            
+        url = ("http://localhost:"+str(drayer_port)+"/"+
+            urllib.parse.quote_plus(base64.b64encode(db.pubkey).decode("utf8"))+"/webAccess/"+"index.html")
+
         webbrowser.open(url)
     
     
@@ -371,6 +371,8 @@ class Window(QMainWindow):
     
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
+        if len(sys.argv)>1:
+            self.tabs.addTab(DrayerStreamTab(sys.argv[-1]), sys.argv[-1])
 
 def run():
     app = QApplication(sys.argv)

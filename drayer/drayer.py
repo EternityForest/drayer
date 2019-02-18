@@ -76,14 +76,28 @@ def decode_base64(data, altchars=b'+/'):
     return base64.b64decode(data, altchars)
 
 
+
+
 class DrayerWebServer(object):
     @cherrypy.expose
     def index(self):
         return "Hello World!"
 
 
+    def _cp_dispatch(self,vpath):
+        """Rewrite things that look like stream/opcode to look like opcode/stream"""
+        stream=vpath.pop(0)
+        op=vpath.pop(0)
+
+        cherrypy.request.params["streampk"]= urllib.parse.unquote(stream)
+        return getattr(self,op)
+
+
+    ### ALL THESE ARE'T THE REAL URLS.
+    ### They all take the public key as the first parameter,
+    ### The real url is pubkey/functionname, it gets remapped by cp_dispatch
     @cherrypy.expose
-    def newestRecordsJSON(self, streampk,type,**kw):
+    def newestRecordsJSON(self,type,streampk,**kw):
         """List up to 250 records of the given type.
             Records start with the most recently created, and the after and before
             options can limit the range(They are unix timestamps)
@@ -104,7 +118,7 @@ class DrayerWebServer(object):
 
 
     @cherrypy.expose
-    def listRecordsJSON(self, streampk,type,**kw):
+    def listRecordsJSON(self,type,streampk,**kw):
         """List up to 250 records of the given type.
             Records start with the most recently modified, and the after and before
             options can limit the range(They are unix timestamps)
@@ -126,7 +140,7 @@ class DrayerWebServer(object):
     
 
     @cherrypy.expose
-    def rawwebacess(self, streampk, type, key):
+    def rawwebacess(self, type, key,streampk):
         streampk=decode_base64(streampk)
         if not len(streampk)==32:
             raise ValueError("PK must be 32 bytes")
@@ -135,7 +149,8 @@ class DrayerWebServer(object):
         return _allStreams[streampk].rawGetItemByKey(key, type)	
 
     @cherrypy.expose
-    def webAccess(self, streampk, *key):
+    def webAccess(self, *key,streampk):
+        print(key,streampk)
         streampk=decode_base64(streampk)
         if not len(streampk)==32:
             raise ValueError("PK must be 32 bytes")
@@ -153,7 +168,7 @@ class DrayerWebServer(object):
         return d
 
     @cherrypy.expose
-    def crdr(self, streampk, old):
+    def crdr(self, old,streampk):
         """Asks the node for the block that points to old in the modified chain.
             We might need to patch the chain but not be able to by ourselves
             because we don't have the PK
@@ -183,7 +198,7 @@ class DrayerWebServer(object):
         return(x)
        
     @cherrypy.expose
-    def newRecords(self, streampk, t):
+    def newRecords(self, t,streampk):
         "Returns a msgpacked list of new records"
         streampk=decode_base64(streampk)
         if not len(streampk)==32:
@@ -218,10 +233,7 @@ class DrayerWebServer(object):
             return(x)
             
         
-        
-        
-cherrypy.config.update({'server.socket_port': http_port,'server.socket_host' : '0.0.0.0',
-})
+    
 
 _allStreams = weakref.WeakValueDictionary()
 
@@ -463,12 +475,11 @@ class DrayerStream():
         if chain:
             if not len(chain)==20:
                 raise RuntimeError("Invalid key")
-        #newRecords/PUBKEY/sinceTime
+        #PUBKEY/newRecords/sinceTime
         r = requests.get(
                 url+
-                "newRecords/"+
                 urllib.parse.quote_plus(b64encode(chain or self.pubkey).decode("utf8"))+
-                "/"+str(self.getModifiedTip(chain)),stream=True)
+                "/newRecords/"+str(self.getModifiedTip(chain)),stream=True)
         r.raise_for_status()
         r=r.raw.read(100*1000*1000)
         
@@ -1481,22 +1492,30 @@ def startBittorent():
     global torrentServer
     torrentServer = btdht.DHT()
     torrentServer.start()
-    
+
 def startServer(port=None):
+    global http_port
+    http_port=_startServer(port)
+    return http_port
+
+def _startServer(port=None):
     global http_port
     
     if port:
         http_port=port
-    else:
-        http_port=random.randint(8000, 48000)
-        
+
     cherrypy.tree.mount(DrayerWebServer(), '/',{})
     
     for i in range(0,40):
         try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(("127.0.0.1", http_port))
+            s.close()
+            cherrypy.config.update({'server.socket_port': http_port,'server.socket_host' : '0.0.0.0'})
             cherrypy.engine.start()
             break
         except:
+            print(traceback.format_exc())
             if i==39:
                 raise
             if port:
@@ -1504,3 +1523,4 @@ def startServer(port=None):
                 raise
             #Trying random ports till we find a good one
             http_port = random.randint(8000, 48000)
+    return http_port
