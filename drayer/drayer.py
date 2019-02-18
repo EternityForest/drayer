@@ -651,11 +651,14 @@ class DrayerStream():
         c.execute("SELECT * FROM record WHERE id>? AND id<? AND chain=? ORDER BY modified DESC LIMIT 1",(prev,id,chain))
         for i in c:
             if self.privkey:
-                n=self.getNextModifiedRecord(i['modified'],chain)
-                self._fixPrevChangePointer(n,chain)
+                n=self.getNextModifiedRecord(i['modified'],chain)['id']
+                if n:
+                    self._fixPrevChangePointer(n,chain)
             else:
-                self._requestChainRepair(fixurl, i['prevchange'],i)
-            self.getConn().execute("DELETE FROM record WHERE id==? AND chain=?",(id,chain))
+                n=self.getNextModifiedRecord(i['modified'],chain)
+                if n:
+                    self._requestChainRepair(fixurl, i['prevchange'],n,chain)
+            self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(id,chain))
 
 
     def _requestAllChainRepair(self,url):
