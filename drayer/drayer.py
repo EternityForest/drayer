@@ -639,6 +639,23 @@ class DrayerStream():
         if self._hasRecordBeenDeleted(id,chain):
             raise RuntimeError("Record appears valid but was deleted by a later change")
 
+        if not self.getRecordByModificationTime(x['prevchange'],chain):
+            if x['prevchange']:
+                raise RuntimeError("Record does not fit onto mchain with back pointer: "+str(x['prevchange']))
+
+
+    def _idGarbageCollectFor(self,id,prev, chain=b"",fixurl=None):
+        ""
+
+        c=self.getConn().cursor()
+        c.execute("SELECT * FROM record WHERE id>? AND id<? AND chain=? ORDER BY modified DESC LIMIT 1",(prev,id,chain))
+        for i in c:
+            if self.privkey:
+                n=self.getNextModifiedRecord(i['modified'],chain)
+                self._fixPrevChangePointer(n,chain)
+            else:
+                self._requestChainRepair(fixurl, i['prevchange'],i)
+            self.getConn().execute("DELETE FROM record WHERE id==? AND chain=?",(id,chain))
 
 
     def _requestAllChainRepair(self,url):
@@ -737,7 +754,7 @@ class DrayerStream():
         
         #Quickly garbage collect any values that this change obsoletes
         if not newp==oldp:
-            self.getConn().execute("DELETE FROM record WHERE id<=? AND id>? AND chain=?",(oldp,newp,chain))
+            self._idGarbageCollectFor(oldp,newp,chain)
         #Modified chain GC
         self.getConn().execute("DELETE FROM record WHERE modified>? AND modified<? AND chain=?",(r[b'prevch'],r[b'mod'],chain))
 
@@ -745,6 +762,7 @@ class DrayerStream():
         self.getConn().execute("DELETE FROM record WHERE id=? AND chain=?",(r[b'id'],chain))
         self.getConn().execute("INSERT INTO record VALUES(?,?,?,?,?,?,?,?,?,?)",(r[b'id'],r[b'type'].decode("utf8"),r[b'key'].decode("utf8"),r[b'val'],r[b'hash'],r[b'mod'],r[b'prev'],r[b'prevch'], r[b'sig'],chain))
         self.validateRecord(r[b'id'],chain)
+
 
 
         
@@ -842,7 +860,7 @@ class DrayerStream():
             if self.getRecordById(prev,chain):
                 if modified<=self.getRecordById(prev,chain)['modified']:
                     raise RuntimeError("Cannot connect to newer with older")
-                self.getConn().execute("DELETE FROM record WHERE id>? AND id<?",(prev,id))
+                self._idGarbageCollectFor(id,prev,chain,requestURL)
                 #TODO: Put in the real changes
                 doUnknownOnChange = True
             elif self.getFirstRecordAfter(id,chain):
@@ -882,6 +900,7 @@ class DrayerStream():
                 #Since the record we are replacing won't be there, we need to find
                 #What really points at that record(Or the one before it, etc, if it's gone)
                 p = oldRecord["prevchange"]	
+
                 #We have the private key, why not do the patch ourselves?
                 if self.privkey:
                     def doChainFix():
@@ -933,9 +952,7 @@ class DrayerStream():
             if not oldPrev==prev:
                 #If we changed prev we need to garbage collect the unreachable node.
                 self._hasRecordBeenDeleted(oldPrev,chain)
-        #
-        c = self.getConn().cursor()
-        
+            
                     
     def __delitem__(self,k):
         self.rawDelete(k,"obj")
