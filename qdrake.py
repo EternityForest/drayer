@@ -319,7 +319,10 @@ class Window(QMainWindow):
 
     def runBrowser(self):
         db = self.tabs.currentWidget().stream
-        webbrowser.open(db.url())
+        url = ("http://localhost:"+str(drayer.http_port)+"/webAccess/"+
+            urllib.parse.quote_plus(base64.b64encode(db.pubkey).decode("utf8"))+"/"+"index.html")
+            
+        webbrowser.open(url)
     
     
     def __init__(self):
