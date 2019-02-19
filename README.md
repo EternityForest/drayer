@@ -151,6 +151,10 @@ The timestamp is purely apaplication level, and has no specific protocol level r
 
 However, the "file" datatype standard still uses a separate timestamp. This is for compaitibility with .zip files, which encode the actual modified date of the source file,and for conflict resolution it is helpful to know both the time the actual file changed, and the time it was entered into a stream. This allows moving to an older file, while stil allowing multi-stream conflict resolution.
 
+Any application where timestamps can move backwards, should use embedded timesetamps in the data instead, otherwise conflict resolution may reject stamps that have moved backwards, when the application uses multiple chains.
+
+
+
 
 The basic "attributes", misc data we store in the file, is kept in:
 `CREATE TABLE IF NOT EXISTS attr (key text, value text);`

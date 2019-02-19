@@ -10,7 +10,7 @@ from PyQt5.QtCore import QObject, pyqtSignal
 
 
 import drayer, sys, os,time
-import webbrowser,urllib, base64
+import webbrowser,urllib, base64,threading
 
 dracoStyle="""
     QWidget{
@@ -315,7 +315,22 @@ class Window(QMainWindow):
 
         webbrowser.open(url)
     
-    
+    def startDHT(self):
+        buttonReply =QMessageBox.question(self, 'Connect to the BitTorrent DHT and open port?', "This will make all streams in this window publically accessible until you close the program", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if buttonReply==QMessageBox.Yes:
+            def f():
+                drayer.startBittorent()
+                drayer.openRouterPort()
+            t = threading.Thread(target=f, daemon=True)
+            t.start()
+
+
+    def serveOnBt(self):
+        buttonReply = QMessageBox.question(self, 'Advertise this stream on mainlineDHT?', "Serve "+self.tabs.currentWidget().stream.fn+"?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if buttonReply==QMessageBox.Yes:
+            self.tabs.currentWidget().stream.announceDHT()
+
+
     def __init__(self):
         super(Window, self).__init__()
         self.setGeometry(50, 50, 500, 300)
@@ -342,6 +357,11 @@ class Window(QMainWindow):
         keyAction = QAction("&Show public key", self)
         keyAction.triggered.connect(self.showPubkey)
 
+        advertiseAction = QAction("&Publish selected stream to DHT", self)
+        advertiseAction.triggered.connect(self.serveOnBt)
+        
+        btAction = QAction("&Connect to BitTorrent DHT", self)
+        btAction.triggered.connect(self.startDHT)
 
         importAction = QAction("&Sync with folder(Add files in folder/delete files not in folder)", self)
         importAction.setToolTip("Add files in folder to stream, remove files not in folder")
@@ -355,10 +375,12 @@ class Window(QMainWindow):
         fileMenu.addAction(createAction)
         fileMenu.addAction(filesAction)
         fileMenu.addAction(keyAction)
+        fileMenu.addAction(advertiseAction)
 
         actionMenu.addAction(browserAction)
         actionMenu.addAction(importAction)
         actionMenu.addAction(qrAction)
+        actionMenu.addAction(btAction)
     
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)

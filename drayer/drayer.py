@@ -555,20 +555,10 @@ class DrayerStream():
                     
                 
     def getSiblingChains(self):
-        """Return a dict of all sibling chains, including ones referenced BY sibling chains that have not been synced yet.
-            dict entries returned as:
-            
-            pubkey(bin): entrytimestamp, validstart(0 for never), validend(0 for none)
-                    
-            Nodes merge in records from other nodes,and later entrytimestamps take priority.
-            We have no way to really delete these records, just to leave an invalid marker.
-            
-            However, we have a special reseved entry. A pubkey value of b"COMPLETE" declares
-            that there are no period entries older than that which are still valid.
-            
-            To make things easier, only one period per key.
-            Sibl
-            The actual DrayerSiblings record format is just a list of msgpack dicts.
+        """Return a dict of all sibling chains
+            pubkey(bin): entrytimestamp, validstart(0 for never), validend(0 for none).
+
+            This is nowhere near actually tested
         """	
         
         #TODO: actually implement this. It's nowhere near a real thing yet.
