@@ -380,7 +380,7 @@ class DrayerStream():
 
     def getBytesForSignature(self, id,type,key,h,timestamp, modified, prev,prevchanged):
         #This is currently the definition of how to make a signature
-        return struct.pack("<QqqqqL", id,timestamp,modified,prev, prevchanged,len(key))+key.encode("utf8")+h+type.encode("utf8")
+        return struct.pack("<Qqqqq", id,timestamp,modified,prev, prevchanged)+drayer_hash(key.encode("utf8"))+h+drayer_hash(type.encode("utf8"))
     
     def makeSignature(self, id,type,key, h, timestamp,modified, prev,prevchanged,chain=None):
         if not chain == self.pubkey:

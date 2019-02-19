@@ -132,7 +132,7 @@ See theory.md and notes.md if you want to know more.
  The signature for a record is computed on the following byte sequence, defined by this
  python code:
  
- `struct.pack("<QqqqqL", id,timestamp,modified,prev, prevchanged,len(key))+key.encode("utf8")+h+type.encode("utf8")`
+ `return struct.pack("<Qqqqq", id,timestamp,modified,prev, prevchanged)+drayer_hash(key.encode("utf8"))+h+drayer_hash(type.encode("utf8"))`
  
  Where h is the unkeyed hash of the value of that key. The indirection has several useful
  properties.
