@@ -132,7 +132,7 @@ See theory.md and notes.md if you want to know more.
  The signature for a record is computed on the following byte sequence, defined by this
  python code:
  
- `struct.pack("<QqqqL", id,modified,prev, prevchanged,len(key))+key.encode("utf8")+h+type.encode("utf8")`
+ `struct.pack("<QqqqqL", id,timestamp,modified,prev, prevchanged,len(key))+key.encode("utf8")+h+type.encode("utf8")`
  
  Where h is the unkeyed hash of the value of that key. The indirection has several useful
  properties.
@@ -140,11 +140,16 @@ See theory.md and notes.md if you want to know more.
 
 ## SQlite Storage
 The actual records are stored in the following table:
-`CREATE TABLE IF NOT EXISTS record (id integer, type text, key text, value blob, hash blob, modified integer, prev integer, prevchange integer, signature blob,chain blob);`
+`CREATE TABLE IF NOT EXISTS record (id integer, type text, key text, value blob, hash blob,timestamp integer,  modified integer, prev integer, prevchange integer, signature blob,chain blob);`
 
 The chain entry is normally blank, but we have native support for "sibling chains", so we can store OTHER chains in here that are considered "included"
 when we ask for results. These other chains should sync just like the main chain although we can only add to the main chain.
 
+We have both a "timestamp" and a "modified time". The difference is that the modified time is for the record itself, and may change for reasons that have nothing to do with the data itself, and so cannot be used by applications.
+
+The timestamp is purely apaplication level, and has no specific protocol level requirements. It is included mostly to allow conflict resolution between multiple chains.
+
+However, the "file" datatype standard still uses a separate timestamp. This is for compaitibility with .zip files, which encode the actual modified date of the source file,and for conflict resolution it is helpful to know both the time the actual file changed, and the time it was entered into a stream. This allows moving to an older file, while stil allowing multi-stream conflict resolution.
 
 
 The basic "attributes", misc data we store in the file, is kept in:
