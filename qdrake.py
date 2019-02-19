@@ -54,7 +54,7 @@ atexit.register(cleanup)
 
 def getPublicSocialposts(stream):
     c = stream.getConn().cursor()
-    c.execute('SELECT key,value FROM record WHERE type="publicSocialPost" ORDER BY id desc')
+    c.execute('SELECT key,timestamp,value FROM record WHERE type="publicSocialPost" ORDER BY id desc')
     return c
 
 def getFiles(stream):
@@ -66,15 +66,8 @@ def errorWindow(e=None):
     jhj
 
 def getOneSocialPost(key,stream):
-    d=stream.rawGetItemByKey(key,'publicSocialPost')
-    k=key.split(":",1)
-    t = 12345
-    try:
-        t = float(k[0])
-        title=k[1]
-    except:
-        title="Untitled"
-    return (title, t, d)
+    r=stream.rawGetRecordByKey(key,'publicSocialPost')
+    return (key, r['timestamp'], r['value'])
 
 
 
@@ -187,14 +180,8 @@ class DrayerStreamTab(QWidget):
         x.setText("New Post")
         self.streamContents.addItem(x)
         for i in getPublicSocialposts(self.stream):
-            k=i["key"].split(":",1)
-            t = 12345
-            try:
-                t = float(k[0])
-                title=k[1]
-            except:
-                title="Untitled"
-            title = time.strftime("%Y %b %d %I:%M%p",time.gmtime(t))+" "+title
+
+            title = time.strftime("%Y %b %d %I:%M%p",time.gmtime(i['timestamp']/1000000))+" "+i['key']
             x = QListWidgetItem()
             x.k = i['key']
 
@@ -207,7 +194,7 @@ class DrayerStreamTab(QWidget):
             if not self.titlebox.text():
                 errorWindow("Empty title!")
                 return
-            self.stream.rawSetItem(str(time.time())+":"+self.titlebox.text(),self.textbox.toPlainText().encode("utf8"),"publicSocialPost")
+            self.stream.rawSetItem(self.titlebox.text(),self.textbox.toPlainText().encode("utf8"),"publicSocialPost")
             self.titlebox.setText('')
             self.textbox.setText('')
         else:

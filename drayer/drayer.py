@@ -1106,7 +1106,8 @@ class DrayerStream():
         k,v=self.filterInsert(k,v)
         self.rawSetItem(k,v, "obj")
 
-    def rawSetItem(self,k, v,type):
+    def rawSetItem(self,k, v,type, t=None):
+        t=t or time.time()*1000000
         with self.lock:
             with self.getConn():
                 id = self._getIdForKey(k, type)
@@ -1142,6 +1143,7 @@ class DrayerStream():
         for i in self._getRecordsForKey(k,t):
             return True
         return False
+
     def rawGetItemByKey(self,k,t):
         "Gets an item by key. Could be in any chain at all, including the random subchains"
         e = None
@@ -1159,7 +1161,13 @@ class DrayerStream():
             
         raise e or KeyError(k)
         
-    
+    def rawGetRecordByKey(self,k,t):
+        "Gets an item by key. Could be in any chain at all"
+        for i in self._getRecordsForKey(k,t):
+            return i
+        return None
+
+
     def filterInsert(self,k,v):
         "Preprocess values inserted with the dict insert style"
         return k,msgpack.packb(v,use_bin_type=True)
@@ -1203,7 +1211,7 @@ class DrayerStream():
     def _getRecordsForKey(self, key,type):
         "Returns all records for a key, most recent first"
         c=self.getConn().cursor()
-        c.execute("SELECT * FROM record WHERE key=? AND type=? ORDER BY modified desc",(key,type))
+        c.execute("SELECT * FROM record WHERE key=? AND type=? ORDER BY timestamp desc",(key,type))
         return c
             
     def broadcastUpdate(self, addr= (MCAST_GRP,MCAST_PORT),chain=b""):
