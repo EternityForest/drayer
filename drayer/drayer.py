@@ -14,13 +14,125 @@ MCAST_PORT = 15723
 
 drayer_hash= libnacl.crypto_generichash
 
+
+#UNUSED: Work on adding multiple nodes in one process
+def DrayerNode():
+    def __init__(self):
+        self.http_port=33125
+
+        self.t = threading.Thread(target=self.service,daemon=True)
+        self.t.start()
+
+    def startLocalDiscovery(self):
+        listensock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        listensock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listensock.bind(("", MCAST_PORT))
+        mreq = struct.pack("4sl", socket.inet_aton(MCAST_GRP), socket.INADDR_ANY)
+
+        listensock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        listensock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  
+
+        MULTICAST_TTL = 2
+        sendsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sendsock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, MULTICAST_TTL)
+
+        sendsock.bind(("",0))
+        self.listensock=listensock
+        self.sendsock = sendsock
+
+
+
+    def service(self):
+        
+        while 1:
+            #This failing is just a normal expected thing. We won't always be able to access everything.
+            try:
+                if time.time()-self.lastDidFullSync>fullSyncInterval:
+                    self.lastDidFullSync=time.time()
+                    for i in  self.streams:
+                        try:
+                            self.streams[i]._serviceCopy().sync()
+                        except:
+                            print(traceback.format_exc())
+
+            except:
+                print(traceback.format_exc())
+
+            
+            #Redo DHT announce every ten minutes for all nodes that need it
+            try:
+                if time.time()-self.lastDidAnnounce>10*60:
+                    self.lastDidAnnounce = time.time()
+                    for i in self.streams:
+                        try:
+                            if self.streams[i].enable_dht:
+                                self.streams[i].serviceCopy().announceDHT()
+                        except:
+                            print(traceback.format_exc())
+
+            except:
+                print(traceback.format_exc())
+
+            
+            #Past this point is LAN stuff
+            if not self.localDiscovery:
+                time.sleep(1)
+                continue
+                
+            rd,w,x= select.select([self.sendsock,self.listensock],[],[], 30)
+            for i in rd:
+                b, addr = i.recvfrom(64000)
+                
+                try:
+                    d=msgpack.unpackb(b)				
+                    if d[b"type"] == b"getRecordsSince":
+                        if d[b"chain"] in self.streams:
+                            try:
+                                x= self.streams[d[b"chain"]]
+                                #Internally we use empty strings to mean the local chain	
+                                if	d[b"chain"] == x.pubkey:
+                                    chain = b''
+                                else:
+                                    chain = d[b"chain"]
+                                h = x.getModifiedTip(chain)
+                                if h==None:
+                                    continue
+                                if h>d[b"time"]:
+                                    x.broadcastUpdate(addr)
+                            finally:
+                                del x
+                                
+                    if d[b"type"] == b"record":
+                        #If we allowed random people on the internet to tell us to make HTTP
+                        #requests we'd be the perfect DDoS amplifier
+                        #So we block anything that isn't local.
+                        if not isLocal(addr[0]):
+                            continue
+                            
+                        if d[b"chain"] in self.streams:
+                            try:
+                                x= self.streams[d[b"chain"]]
+                                
+                                #Internally we use empty strings to mean the local chain	
+                                if	d[b"chain"] == x.pubkey:
+                                    chain = b''
+                                else:
+                                    chain = d[b"chain"]
+                                if d[b"mod"]> x.getModifiedTip():
+                                    x.httpSync("http://"+addr[0]+":"+str(d[b"httpport"]),chain)
+                            finally:
+                                del x
+                except:
+                    print(traceback.format_exc())
+
+
 def drayer_hash(d):
     if not isinstance(d, bytes):
         raise TypeError
     return libnacl.crypto_generichash(d)
 
 def readPGP():
-    le,lo ={},{} 
+    le,lo,rev ={},{},rev
     pgpfn = os.path.join(os.path.split(__file__)[0],"pgplist.txt")
     with open(pgpfn) as f:
         l = f.read().split("\n")
@@ -29,9 +141,11 @@ def readPGP():
         h, e, o=i.split("\t")
         lo[int(h,16)]=o
         le[int(h,16)]=e
-    return le,lo
+        rev[o]=int(h,16)
+        rev[e]=int(h,16)
+    return le,lo, rev
 
-pgp_even,pgp_odd = readPGP()
+pgp_even,pgp_odd,pgp_lookup = readPGP()
 
 def encodePGP(b):
     c=0
@@ -239,9 +353,11 @@ class DrayerWebServer(object):
                 
         
     
-
+#Stream objects by key
 _allStreams = weakref.WeakValueDictionary()
 
+#Stream objects by double hash
+_allStreams_dblhash = weakref.WeakValueDictionary()
 
 
 
@@ -250,7 +366,14 @@ class DrayerStream():
         
         if pubkey:
             if isinstance(pubkey, str):
-                pubkey=b64decode(pubkey)
+                pubkey=pubkey.strip()
+                if len(pubkey)==64:
+                    pubkey=b64decode(pubkey)
+                else:
+                    #Try to decode things entered as the PGP wordlist
+                    pubkey=pubkey.lower()
+                    pubkey=pubkey.split(" ")
+                    pubkey = bytes([pgp_lookup[i] for i in pubkey])
         
         self.pubkey = None
         self.privkey = None
@@ -260,6 +383,8 @@ class DrayerStream():
         
         self.lastSynced = 0
         self.lastDHTAnnounce =0
+
+        self.allowCleartext=True
 
         #Enable pushing TO the dht 
         self.enable_dht = False
@@ -332,6 +457,8 @@ class DrayerStream():
 
             if noServe==False:
                 _allStreams[self.pubkey] = self
+
+                _allStreams_dblhash=drayer_hash(drayer_hash(self.pubkey))
     
     def pgpFingerprint(self):
         return encodePGP(self.pubkey[:24])
@@ -470,9 +597,13 @@ class DrayerStream():
                 
     def directHttpSync(self,ip,port,chain=b''):
         "Use an ip port pair to sync"
-        return self.httpSync("http://"+ip+":"+str(port),chain)
+        return self.httpSync(ip,port,chain)
 
+    def ipPortToUrl(self,ip,port)
+        ("http://"+ip+":"+str(port))
+        
     def httpSync(self,url,chain=b''):
+
         """Gets any updates that an HTTP server might have"""
         if url.endswith("/"):
             pass
@@ -1218,10 +1349,9 @@ class DrayerStream():
         if not i:
             return
         chain = chain or self.pubkey
-        #sendsock.sendto(("record\n"+b64encode(self.pubkey).decode("utf8")+"\n"+str(d)+"\n"+str(http_port)).encode("utf8"), addr)
     
     
-        sendsock.sendto(msgpack.packb({"type":"record",
+        sendsock.sendto(self.encUpdate(msgpack.packb({"type":"record",
                 "hash":i["hash"],
                 "key":i["key"],
                 "id": i["id"],
@@ -1231,8 +1361,30 @@ class DrayerStream():
                 "mod":i["modified"],
                 "httpport": http_port,
                 "chain":chain
-                }),addr)
-    
+                }),chain),addr)
+
+    def encUpdate(self, data,chain):
+        "Encodes a data record or not, depending on if cleartext is on"
+        if self.allow_cleartext:
+            return data
+        else:
+            return self.encrypt(data)
+
+
+    #UNUSED
+    def encrypt(self,data,chain=b''):
+        """Encrypt data using the hash of this streams public key.
+           This allows a fair amount of security if attackers don't know about that
+           key.
+        """
+        pass
+        # chain = chain or self.pubkey
+        # h1=libnacl.crypto_generichash(chain)
+        # h2=libnacl.crypto_generichash(chain)
+        # x=os.urandom(libnacl.crypto_secretbox_NONCEBYTES)
+        # return  h2+x+libnacl.crypto_secretbox(data,x,h1)
+
+
     def _hasRecordBeenDeleted(self,id,chain=b""):
         "Returns True, and also deletes the record for real, if it should be garbage collected because its unreachable"
 
