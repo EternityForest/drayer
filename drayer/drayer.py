@@ -12,8 +12,8 @@ MCAST_GRP = '224.7.130.8'
 MCAST_PORT = 15723
 
 
-drayer_hash= libnacl.crypto_generichash
-
+PLAINTEXT_DRAYERUDP=b'\xab\xc1a)'
+ENCRYPTED_DRAYERUDP=b'k\xae\xf5\x9b'
 
 #UNUSED: Work on adding multiple nodes in one process
 def DrayerNode():
@@ -632,7 +632,7 @@ class DrayerStream():
                         
                     
             if localDiscovery:
-                sendsock.sendto(msgpack.packb({
+                sendsock.sendto(PLAINTEXT_DRAYERUDP+msgpack.packb({
                 "mtype":"getRecordsSince",
                 "chain":chain,
                 "time": self.getModifiedTip()}), (MCAST_GRP,MCAST_PORT))
@@ -1412,7 +1412,7 @@ class DrayerStream():
     def encUpdate(self, data,chain):
         "Encodes a data record or not, depending on if cleartext is on"
         if self.allowCleartext:
-            return data
+            return PLAINTEXT_DRAYERUDP+data
         else:
             return self.encrypt(data)
 
@@ -1673,9 +1673,10 @@ def drayerServise():
         rd,w,x= select.select([sendsock,listensock],[],[], 30)
         for i in rd:
             b, addr = i.recvfrom(64000)
-            
+            if not b[:4]== PLAINTEXT_DRAYERUDP:
+                continue
             try:
-                d=msgpack.unpackb(b)				
+                d=msgpack.unpackb(b[4:])				
                 if d[b"mtype"] == b"getRecordsSince":
                     if d[b"chain"] in _allStreams:
                         try:
