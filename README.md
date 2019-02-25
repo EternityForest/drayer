@@ -190,6 +190,12 @@ untrusted networks. HTTPS could easily be used, but the reference implementation
 
 Using HTTP means that a future javascript implementation is possible.
 
+## Primary Servers
+
+Streams can have embedded lists of primary servers, so you know where to go for updates.
+
+This is stored in key:type primaryServers:drayer, and is a msgpack liat of dicts having a type and url field(type must be "http" for now). Note that as this is somewhat of a higher level extension, we use msgpack's separate bin and string types, as everything
+except the core should.
 
 
 ### HTTP Protocol

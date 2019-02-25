@@ -22,7 +22,6 @@ def DrayerNode():
 
         self.t = threading.Thread(target=self.service,daemon=True)
         self.t.start()
-
     def startLocalDiscovery(self):
         listensock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         listensock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -132,7 +131,7 @@ def drayer_hash(d):
     return libnacl.crypto_generichash(d)
 
 def readPGP():
-    le,lo,rev ={},{},rev
+    le,lo,rev ={},{},{}
     pgpfn = os.path.join(os.path.split(__file__)[0],"pgplist.txt")
     with open(pgpfn) as f:
         l = f.read().split("\n")
@@ -210,6 +209,28 @@ class DrayerWebServer(object):
     ### ALL THESE ARE'T THE REAL URLS.
     ### They all take the public key as the first parameter,
     ### The real url is pubkey/functionname, it gets remapped by cp_dispatch
+
+
+
+    @cherrypy.expose
+    def newRecordAvailable(self,type,streampk,**kw):
+        """List up to 250 records of the given type.
+            Records start with the most recently created, and the after and before
+            options can limit the range(They are unix timestamps)
+        """
+
+        x =[]
+        streampk=decode_base64(streampk)
+        if not len(streampk)==32:
+            raise ValueError("PK must be 32 bytes")
+        db = _allStreams[streampk]
+        r = msgpack.unpackb(kw[b'record'])
+        if not d[b'mod']> db.getModifiedTip():
+            return
+        #We don't even make the requests for invalid records
+        db.checkSignature(r[b'id'],r[b'type'].decode("utf8"),r[b'key'].decode("utf8"),r[b'hash'],r[b'ts'], r[b'mod'], r[b'prev'], r[b'prevch'],r[b'sig'],chain,value=r[b'val'])
+        db.sync(db.ipPortToUrl(cherrypy.request.address[0],kw['port']))
+
     @cherrypy.expose
     def newestRecordsJSON(self,type,streampk,**kw):
         """List up to 250 records of the given type.
@@ -473,6 +494,29 @@ class DrayerStream():
             self.tloc.conn.row_factory = sqlite3.Row
             return self.tloc.conn
 
+    def pushToPrimary(chain=b''):
+        x = self.getPrimaryServers()
+
+        i= self.getModifiedTipRecord(chain)
+        if not i:
+            return
+        chain = chain or self.pubkey
+        d = msgpack.packb({"type":i['type'],
+                "hash":i["hash"],
+                "key":i["key"],
+                "id": i["id"],
+                "sig":i["signature"],
+                "prev":i["prev"],
+                "prevch":i["prevchange"],
+                "mod":i["modified"],
+                "httpport": http_port,
+                "chain":chain
+                })
+
+        for s in x:
+            requests.get(s['url']+base64.b64encode(chain).decode("utf8")+"/newRecordAvailable", record=d, port=self.http_port)
+
+
     def importFiles(self, dir, deletemissing=False, limit=50*1024*1024):
         if not os.path.exists(dir):
             raise RuntimeError("Bad dir")
@@ -518,13 +562,13 @@ class DrayerStream():
         
     
     def setPrimaryServers(self, servers):
-        self.rawSetItem("primaryServers", msgpack.packb(servers), "drayer")
+        self.rawSetItem("primaryServers", msgpack.packb(servers,use_bin_type=True), "drayer")
         
     def getPrimaryServers(self):
         #Returns a list of trusted primary servers.
         #When syncing, we should sync to one of them.
         if self.keyExists("primaryServers","drayer"):
-            return msgpack.unpackb(self.rawGetItemByKey("primaryServers","drayer"))
+            return msgpack.unpackb(self.rawGetItemByKey("primaryServers","drayer"),raw=False)
         return []
 
     def sync(self,url=None):
@@ -552,8 +596,9 @@ class DrayerStream():
                     s =self.getPrimaryServers()
                     if s:
                         #Filter by what we know how to handle
-                        s = {i:s[i] for i in s if s[i]["type"]=="http"}
+                        s = [i for i in s if i["type"]=="http"]
                         self.selectedServer = random.choice(s)
+                        logging.debug("Selected server: "+self.selectedServer['url'])
                 except KeyError:
                     self.selectedServer = None
                 
@@ -567,6 +612,7 @@ class DrayerStream():
                 except:
                     #If it was unreachable, pick a new server
                     self.selectedServer=None
+                    print(traceback.format_exc())
                     pass
                     
             
@@ -587,7 +633,7 @@ class DrayerStream():
                     
             if localDiscovery:
                 sendsock.sendto(msgpack.packb({
-                "type":"getRecordsSince",
+                "mtype":"getRecordsSince",
                 "chain":chain,
                 "time": self.getModifiedTip()}), (MCAST_GRP,MCAST_PORT))
                 
@@ -599,8 +645,8 @@ class DrayerStream():
         "Use an ip port pair to sync"
         return self.httpSync(ip,port,chain)
 
-    def ipPortToUrl(self,ip,port)
-        ("http://"+ip+":"+str(port))
+    def ipPortToUrl(self,ip,port):
+        return ("http://"+ip+":"+str(port))
         
     def httpSync(self,url,chain=b''):
 
@@ -611,7 +657,7 @@ class DrayerStream():
             url+="/"
         
         if chain:
-            if not len(chain)==20:
+            if not len(chain)==32:
                 raise RuntimeError("Invalid key")
         #PUBKEY/newRecords/sinceTime
         r = requests.get(
@@ -1351,7 +1397,7 @@ class DrayerStream():
         chain = chain or self.pubkey
     
     
-        sendsock.sendto(self.encUpdate(msgpack.packb({"type":"record",
+        sendsock.sendto(self.encUpdate(msgpack.packb({"mtype":"record",
                 "hash":i["hash"],
                 "key":i["key"],
                 "id": i["id"],
@@ -1365,7 +1411,7 @@ class DrayerStream():
 
     def encUpdate(self, data,chain):
         "Encodes a data record or not, depending on if cleartext is on"
-        if self.allow_cleartext:
+        if self.allowCleartext:
             return data
         else:
             return self.encrypt(data)
@@ -1630,7 +1676,7 @@ def drayerServise():
             
             try:
                 d=msgpack.unpackb(b)				
-                if d[b"type"] == b"getRecordsSince":
+                if d[b"mtype"] == b"getRecordsSince":
                     if d[b"chain"] in _allStreams:
                         try:
                             x= _allStreams[d[b"chain"]]
@@ -1647,7 +1693,7 @@ def drayerServise():
                         finally:
                             del x
                             
-                if d[b"type"] == b"record":
+                if d[b"mtype"] == b"record":
                     #If we allowed random people on the internet to tell us to make HTTP
                     #requests we'd be the perfect DDoS amplifier
                     #So we block anything that isn't local.

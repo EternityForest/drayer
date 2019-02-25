@@ -63,7 +63,8 @@ def getFiles(stream):
     return c
 
 def errorWindow(e=None):
-    jhj
+    QMessageBox.question(self, 'Error?',str(e) or traceback.format_exc(2), QMessageBox.Yes, QMessageBox.Yes)
+
 
 def getOneSocialPost(key,stream):
     r=stream.rawGetRecordByKey(key,'publicSocialPost')
@@ -117,6 +118,31 @@ class DrayerStreamTab(QWidget):
         l.setPixmap(pix)
         d.adjustSize()
         d.show() 
+
+    def primaryServersDialog(self):
+        import msgpack,json
+    
+
+        d = QDialog(self)
+
+        w=QWidget(d)
+        lo=QVBoxLayout()
+        w.setLayout(lo)
+
+        td = "\r\n".join([json.dumps(i) for i in self.stream.getPrimaryServers()])
+        t=QTextEdit()
+        t.setText(td)
+        t.setPlaceholderText('{"type":"http", "url":"YourServerURLHere"')
+
+        b=QPushButton("Save")
+        lo.addWidget(t)
+        lo.addWidget(b)
+
+        def f(*a):
+            self.stream.setPrimaryServers([json.loads(i.strip()) for i in t.toPlainText().split("\n")])
+        b.clicked.connect(f)
+        d.show()
+
 
     def showFilesDialog(self):
         d = QDialog(self)
@@ -296,6 +322,9 @@ class Window(QMainWindow):
     
     def showPubkey(self):
         self.tabs.currentWidget().showPubkey()
+    
+    def showPrimaryServers(self):
+        self.tabs.currentWidget().primaryServersDialog()
 
     def createWizard(self):
         pk = QInputDialog.getText(self, "Enter Public Key of the Stream","Leave blank to create a new stream with a new keypair in publish mode" )
@@ -341,6 +370,10 @@ class Window(QMainWindow):
         loadAction.setToolTip('Load an existing streamfile')
         loadAction.triggered.connect(self.loadWizard)
 
+        psAction = QAction("&Primary servers for stream", self)
+        psAction.setToolTip('Show the primary serers for the selected tab')
+        psAction.triggered.connect(self.showPrimaryServers)
+
         createAction = QAction("&Create or Import a stream", self)
         createAction.triggered.connect(self.createWizard)
 
@@ -376,6 +409,7 @@ class Window(QMainWindow):
         fileMenu.addAction(filesAction)
         fileMenu.addAction(keyAction)
         fileMenu.addAction(advertiseAction)
+        fileMenu.addAction(psAction)
 
         actionMenu.addAction(browserAction)
         actionMenu.addAction(importAction)
