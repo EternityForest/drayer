@@ -245,7 +245,7 @@ class DrayerWebServer(object):
         db = _allStreams[streampk]
         
         c = db.getConn().cursor()
-        c.execute('SELECT * FROM record WHERE type=? AND modified >? AND modified<? ORDER BY id desc LIMIT 250',(type, kw.get("after",0),kw.get("before",2**62)))
+        c.execute('SELECT * FROM record WHERE type=? AND id >? AND id<? ORDER BY id desc LIMIT 250',(type, kw.get("after",0),kw.get("before",2**62)))
 
         for i in c:
             x.append([i['key'],i['modified']])
