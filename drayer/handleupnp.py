@@ -1,4 +1,4 @@
-import upnpclient,atexit,threading,socket
+import upnpclient,atexit,threading,socket,time
 from urllib.parse import urlparse
 
 
@@ -82,7 +82,6 @@ def addMapping(port,proto, desc="Description here"):
 								NewExternalPort=port,
 								NewProtocol=proto,
 							)
-							print("del")
 							
 						with listlock:
 							cleanuplist.append(clean)
@@ -98,7 +97,6 @@ def addMapping(port,proto, desc="Description here"):
 								NewPortMappingDescription=desc,
 								NewLeaseDuration=3600
 							)
-							print("add")
 							
 						renew()
 						with listlock:
@@ -119,5 +117,4 @@ def renewer():
 				
 rth = threading.Thread(target=renewer)
 rth.daemon=True
-addMapping(34531,"UDP")
-print(getWANAddresses())
+rth.start()

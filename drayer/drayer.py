@@ -516,8 +516,8 @@ class DrayerStream():
                 })
 
         for s in x:
-            if "udp" in x:
-                self.broadcastUpdate((x["udp"][0], x["udp"][1]))
+            if "udp" in s:
+                self.broadcastUpdate((s["udp"][0], s["udp"][1]))
 
     def importFiles(self, dir, deletemissing=False, limit=50*1024*1024):
         if not os.path.exists(dir):
@@ -1408,7 +1408,7 @@ class DrayerStream():
             return
         chain = chain or self.pubkey
     
-    
+        print(addr)
         sendsock.sendto(self.encUpdate(msgpack.packb({"mtype":"record",
                 "hash":i["hash"],
                 "key":i["key"],
@@ -1707,12 +1707,6 @@ def drayerServise():
                             del x
                             
                 if d[b"mtype"] == b"record":
-                    #If we allowed random people on the internet to tell us to make HTTP
-                    #requests we'd be the perfect DDoS amplifier
-                    #So we block anything that isn't local.
-                    if not isLocal(addr[0]):
-                        continue
-                        
                     if d[b"chain"] in _allStreams:
                         try:
                             x= _allStreams[d[b"chain"]]
@@ -1741,14 +1735,15 @@ def startLocalDiscovery():
 
 
 isRouterPortOpen = False
-
+mappings = None
 def openRouterPort():
     "Open a port on the local router, making cherrypy's HTTP server TOTALLY PUBLIC"
     global isRouterPortOpen
+    global mappings
     isRouterPortOpen = True
     
     from . import handleupnp
-    handleupnp.addMapping(http_port, "TCP", "Drayer HTTP protocol")
+    mappings=handleupnp.addMapping(http_port, "TCP", "Drayer HTTP protocol")
 
 torrentServer=None
 
