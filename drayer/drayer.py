@@ -245,7 +245,7 @@ class DrayerWebServer(object):
         db = _allStreams[streampk]
         
         c = db.getConn().cursor()
-        c.execute('SELECT * FROM record WHERE type=? AND id >? AND id<? ORDER BY id desc LIMIT 250',(type, kw.get("after",0),kw.get("before",2**62)))
+        c.execute('SELECT * FROM record WHERE type=? AND id>? AND id<? ORDER BY id desc LIMIT 250',(type, kw.get("after",0),kw.get("before",2**62)))
 
         for i in c:
             x.append([i['key'],i['modified']])
@@ -495,6 +495,9 @@ class DrayerStream():
             return self.tloc.conn
 
     def pushToPrimary(chain=b''):
+        if not isRouterPortOpen:
+            return
+
         x = self.getPrimaryServers()
 
         i= self.getModifiedTipRecord(chain)
@@ -1205,6 +1208,8 @@ class DrayerStream():
                 if needsPatching2:
                     self._fixPrevChangePointer(needsPatching2)
         self.broadcastUpdate()
+        self.pushToPrimary()
+
     
             
     def _fixPrevChangePointer(self,id,chain=b'',p=None):
@@ -1301,6 +1306,7 @@ class DrayerStream():
                 self.validateRecord(id)
 
                 self.broadcastUpdate()
+        self.pushToPrimary()
         
     def __getitem__(self,k):
         return self.filterGet(self.rawGetItemByKey(k,"obj"))

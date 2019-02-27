@@ -165,6 +165,22 @@ class DrayerStreamTab(QWidget):
         d.adjustSize()
         d.show() 
 
+
+    def showSyncDialog(self):
+        d = QDialog(self)
+        w=QWidget(d)
+        lo=QVBoxLayout()
+        w.setLayout(lo)
+
+        l = QLineEdit()
+        l.setPlaceholderText("Url")
+        lo.addWidget(l)
+       
+        b=QPushButton("Sync with URL")
+        def f(*a):
+            self.stream.sync(l.text())
+        d.show() 
+
     def showPubkey(self):
 
         d = QDialog(self)
