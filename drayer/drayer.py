@@ -1771,7 +1771,7 @@ def _startServer(port=None):
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.bind(("127.0.0.1", http_port))
             s.close()
-            cherrypy.config.update({'server.socket_port': http_port,'server.socket_host' : '0.0.0.0'})
+            cherrypy.config.update({'server.socket_port': http_port,'server.socket_host' : '::'})
             cherrypy.engine.start()
             break
         except:
