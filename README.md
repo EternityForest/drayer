@@ -25,6 +25,8 @@ networks.
 
 Qdrake lets you make publicSocialPosts, clone streams, read posts in cloned streams, sync streams, add files to the stream, and with `qrcode` installed lets you show a QR code for a mibile browser on the same LAN to view an `index.html` included in the stream.
 
+clocktower.drayer is a stream that has some info about the test server it's hosted on, if you want to try it out quickly.
+
 
 
 ### Why it isn't private
