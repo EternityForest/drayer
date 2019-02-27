@@ -388,7 +388,7 @@ class DrayerStream():
         if pubkey:
             if isinstance(pubkey, str):
                 pubkey=pubkey.strip()
-                if len(pubkey)==64:
+                if not " " in pubkey.strip():
                     pubkey=b64decode(pubkey)
                 else:
                     #Try to decode things entered as the PGP wordlist
