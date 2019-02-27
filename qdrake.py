@@ -369,6 +369,13 @@ class Window(QMainWindow):
             t = threading.Thread(target=f, daemon=True)
             t.start()
 
+    def openPort(self):
+        buttonReply =QMessageBox.question(self, 'Open port with UPnP?', "This will let devices on the internet read these streams.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if buttonReply==QMessageBox.Yes:
+            def f():
+                drayer.openRouterPort()
+            t = threading.Thread(target=f, daemon=True)
+            t.start()
 
     def serveOnBt(self):
         buttonReply = QMessageBox.question(self, 'Advertise this stream on mainlineDHT?', "Serve "+self.tabs.currentWidget().stream.fn+"?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
@@ -411,7 +418,10 @@ class Window(QMainWindow):
         
         btAction = QAction("&Connect to BitTorrent DHT", self)
         btAction.triggered.connect(self.startDHT)
-
+        
+        portAction = QAction("&Open port with UPnP", self)
+        portAction.triggered.connect(self.openPort)
+        
         importAction = QAction("&Sync with folder(Add files in folder/delete files not in folder)", self)
         importAction.setToolTip("Add files in folder to stream, remove files not in folder")
         importAction.triggered.connect(self.syncFilesPrompt)
@@ -431,6 +441,7 @@ class Window(QMainWindow):
         actionMenu.addAction(importAction)
         actionMenu.addAction(qrAction)
         actionMenu.addAction(btAction)
+        actionMenu.addAction(portAction)
     
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)

@@ -50,7 +50,7 @@ def DrayerNode():
                     self.lastDidFullSync=time.time()
                     for i in  self.streams:
                         try:
-                            self.streams[i]._serviceCopy().sync()
+                            self.streams[i]._threadCopy().sync()
                         except:
                             print(traceback.format_exc())
 
@@ -65,7 +65,7 @@ def DrayerNode():
                     for i in self.streams:
                         try:
                             if self.streams[i].enable_dht:
-                                self.streams[i].serviceCopy().announceDHT()
+                                self.streams[i]._threadCopy().announceDHT()
                         except:
                             print(traceback.format_exc())
 
@@ -218,18 +218,21 @@ class DrayerWebServer(object):
             Records start with the most recently created, and the after and before
             options can limit the range(They are unix timestamps)
         """
-
-        x =[]
-        streampk=decode_base64(streampk)
-        if not len(streampk)==32:
-            raise ValueError("PK must be 32 bytes")
-        db = _allStreams[streampk]
-        r = msgpack.unpackb(kw[b'record'])
-        if not d[b'mod']> db.getModifiedTip():
-            return
-        #We don't even make the requests for invalid records
-        db.checkSignature(r[b'id'],r[b'type'].decode("utf8"),r[b'key'].decode("utf8"),r[b'hash'],r[b'ts'], r[b'mod'], r[b'prev'], r[b'prevch'],r[b'sig'],chain,value=r[b'val'])
-        db.sync(db.ipPortToUrl(cherrypy.request.address[0],kw['port']))
+        try:
+            x =[]
+            streampk=decode_base64(streampk)
+            if not len(streampk)==32:
+                raise ValueError("PK must be 32 bytes")
+            db = _allStreams[streampk]
+            r = msgpack.unpackb(kw['record'])
+            if not r[b'mod']> db.getModifiedTip():
+                return
+            #We don't even make the requests for invalid records
+            db.checkSignature(r[b'id'],r[b'type'].decode("utf8"),r[b'key'].decode("utf8"),r[b'hash'],r[b'ts'], r[b'mod'], r[b'prev'], r[b'prevch'],r[b'sig'],r[b'chain'],value=r[b'val'])
+            db.sync(db.ipPortToUrl(cherrypy.request.address[0],kw['port']))
+        except:
+            print(traceback.format_exc())
+            raise
 
     @cherrypy.expose
     def newestRecordsJSON(self,type,streampk,**kw):
@@ -494,7 +497,7 @@ class DrayerStream():
             self.tloc.conn.row_factory = sqlite3.Row
             return self.tloc.conn
 
-    def pushToPrimary(chain=b''):
+    def pushToPrimary(self,chain=b''):
         if not isRouterPortOpen:
             return
 
@@ -517,7 +520,7 @@ class DrayerStream():
                 })
 
         for s in x:
-            requests.get(s['url']+base64.b64encode(chain).decode("utf8")+"/newRecordAvailable", record=d, port=self.http_port)
+            requests.get(s['url']+base64.b64encode(chain).decode("utf8")+"/newRecordAvailable", params={"record":d, "port":http_port})
 
 
     def importFiles(self, dir, deletemissing=False, limit=50*1024*1024):
@@ -1648,7 +1651,7 @@ def drayerServise():
                 lastDidFullSync=time.time()
                 for i in _allStreams:
                     try:
-                        _allStreams[i]._serviceCopy().sync()
+                        _allStreams[i]._threadCopy().sync()
                     except:
                         print(traceback.format_exc())
 
@@ -1663,7 +1666,7 @@ def drayerServise():
                 for i in _allStreams:
                     try:
                         if _allStreams[i].enable_dht:
-                            _allStreams[i].serviceCopy().announceDHT()
+                            _allStreams[i]._threadCopy().announceDHT()
                     except:
                         print(traceback.format_exc())
 
