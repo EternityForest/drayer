@@ -50,7 +50,7 @@ def DrayerNode():
                     self.lastDidFullSync=time.time()
                     for i in  self.streams:
                         try:
-                            self.streams[i]._threadCopy().sync()
+                            self.streams[i].sync()
                         except:
                             print(traceback.format_exc())
 
@@ -65,7 +65,7 @@ def DrayerNode():
                     for i in self.streams:
                         try:
                             if self.streams[i].enable_dht:
-                                self.streams[i]._threadCopy().announceDHT()
+                                self.streams[i].announceDHT()
                         except:
                             print(traceback.format_exc())
 
@@ -102,12 +102,6 @@ def DrayerNode():
                                 del x
                                 
                     if d[b"type"] == b"record":
-                        #If we allowed random people on the internet to tell us to make HTTP
-                        #requests we'd be the perfect DDoS amplifier
-                        #So we block anything that isn't local.
-                        if not isLocal(addr[0]):
-                            continue
-                            
                         if d[b"chain"] in self.streams:
                             try:
                                 x= self.streams[d[b"chain"]]
@@ -118,6 +112,8 @@ def DrayerNode():
                                 else:
                                     chain = d[b"chain"]
                                 if d[b"mod"]> x.getModifiedTip():
+
+                                    db.checkSignature(d[b'id'],d[b'type'].decode("utf8"),d[b'key'].decode("utf8"),d[b'hash'],d[b'ts'], d[b'mod'], d[b'prev'], d[b'prevch'],d[b'sig'],d[b'chain'])
                                     x.httpSync("http://"+addr[0]+":"+str(d[b"httpport"]),chain)
                             finally:
                                 del x
@@ -520,8 +516,8 @@ class DrayerStream():
                 })
 
         for s in x:
-            requests.get(s['url']+base64.b64encode(chain).decode("utf8")+"/newRecordAvailable", params={"record":d, "port":http_port})
-
+            if "udp" in x:
+                self.broadcastUpdate((x["udp"][0], x["udp"][1]))
 
     def importFiles(self, dir, deletemissing=False, limit=50*1024*1024):
         if not os.path.exists(dir):
@@ -642,10 +638,17 @@ class DrayerStream():
                 "mtype":"getRecordsSince",
                 "chain":chain,
                 "time": self.getModifiedTip()}), (MCAST_GRP,MCAST_PORT))
+                #Sync is 2-way on the LAN
+                self.broadcastUpdate()
                 
             if inserted:
                 #If we actually got something reset the timer, there's might be more
                 self.lastSynced = 0
+
+            #If we have the privkey, we must be the publisher and should probably
+            #Inform primary servers of our latest record
+            if self.privkey:
+                self.pushToPrimary()
                 
     def directHttpSync(self,ip,port,chain=b''):
         "Use an ip port pair to sync"
@@ -1651,7 +1654,7 @@ def drayerServise():
                 lastDidFullSync=time.time()
                 for i in _allStreams:
                     try:
-                        _allStreams[i]._threadCopy().sync()
+                        _allStreams[i].sync()
                     except:
                         print(traceback.format_exc())
 
@@ -1666,7 +1669,7 @@ def drayerServise():
                 for i in _allStreams:
                     try:
                         if _allStreams[i].enable_dht:
-                            _allStreams[i]._threadCopy().announceDHT()
+                            _allStreams[i].announceDHT()
                     except:
                         print(traceback.format_exc())
 
